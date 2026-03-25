@@ -320,35 +320,34 @@ class TestExtractReadmes:
 # ---------------------------------------------------------------------------
 
 
+def _make_star_edge(name: str, date: str, language: str = "Python", desc: str = ""):
+    """GraphQL starredRepositories edge 헬퍼."""
+    return {
+        "starredAt": date,
+        "node": {
+            "nameWithOwner": name,
+            "description": desc or f"Desc of {name}",
+            "url": f"https://github.com/{name}",
+            "primaryLanguage": {"name": language} if language else None,
+            "stargazerCount": 10,
+            "repositoryTopics": {"nodes": []},
+        },
+    }
+
+
 class TestExtractStars:
     def test_groups_by_month(self, tmp_path: Path):
         """starred repos를 월별로 그룹핑한다."""
-        client = FakeGitHubClient(rest_responses={
-            "/users/user/starred": [
-                {
-                    "starred_at": "2025-02-15T00:00:00Z",
-                    "repo": {
-                        "full_name": "cool/lib",
-                        "description": "A cool library",
-                        "html_url": "https://github.com/cool/lib",
-                        "language": "Rust",
-                        "topics": ["cli"],
-                        "stargazers_count": 100,
-                    },
-                },
-                {
-                    "starred_at": "2025-01-10T00:00:00Z",
-                    "repo": {
-                        "full_name": "nice/tool",
-                        "description": "A nice tool",
-                        "html_url": "https://github.com/nice/tool",
-                        "language": "Go",
-                        "topics": [],
-                        "stargazers_count": 50,
-                    },
-                },
-            ],
-        })
+        edges = [
+            _make_star_edge("cool/lib", "2025-02-15T00:00:00Z", "Rust"),
+            _make_star_edge("nice/tool", "2025-01-10T00:00:00Z", "Go"),
+        ]
+        client = FakeGitHubClient(graphql_responses=[
+            {"viewer": {"starredRepositories": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "edges": edges,
+            }}}
+        ])
 
         stars = extract_stars(client, tmp_path, "user", SINCE)
 
@@ -356,40 +355,19 @@ class TestExtractStars:
         assert (tmp_path / "stars" / "2025-02.md").exists()
         assert (tmp_path / "stars" / "2025-01.md").exists()
 
-    def test_skips_entries_without_timestamp(self, tmp_path: Path):
-        """starred_at이 없는 항목은 건너뛴다."""
-        client = FakeGitHubClient(rest_responses={
-            "/users/user/starred": [
-                {"starred_at": "", "repo": {"full_name": "x/y"}},
-            ],
-        })
-
-        stars = extract_stars(client, tmp_path, "user", SINCE)
-        assert len(stars) == 0
-
     def test_paginates_multiple_pages(self, tmp_path: Path):
         """여러 페이지를 순회하여 모든 starred repos를 수집한다."""
-        def _star(name: str, date: str):
-            return {
-                "starred_at": date,
-                "repo": {
-                    "full_name": name,
-                    "description": f"Desc of {name}",
-                    "html_url": f"https://github.com/{name}",
-                    "language": "Python",
-                    "topics": [],
-                    "stargazers_count": 10,
-                },
-            }
+        page1 = {"viewer": {"starredRepositories": {
+            "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+            "edges": [_make_star_edge("a/repo1", "2025-03-01T00:00:00Z")],
+        }}}
+        page2 = {"viewer": {"starredRepositories": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "edges": [_make_star_edge("b/repo2", "2025-02-01T00:00:00Z")],
+        }}}
+        client = FakeGitHubClient(graphql_responses=[page1, page2])
 
-        # 페이지 1: per_page개 (꽉 참 → 다음 페이지 있음)
-        # 페이지 2: per_page 미만 (마지막 페이지)
-        page1 = [_star("a/repo1", "2025-03-01T00:00:00Z")]
-        page2 = [_star("b/repo2", "2025-02-01T00:00:00Z")]
-
-        client = FakeGitHubClient(rest_sequence=[page1, page2])
-
-        stars = extract_stars(client, tmp_path, "user", SINCE, per_page=1)
+        stars = extract_stars(client, tmp_path, "user", SINCE)
 
         assert len(stars) == 2
         assert stars[0]["name"] == "a/repo1"
@@ -397,18 +375,16 @@ class TestExtractStars:
 
     def test_stops_pagination_at_since_cutoff(self, tmp_path: Path):
         """since 이전의 star를 만나면 페이지네이션을 중단한다."""
-        page1 = [
-            {
-                "starred_at": "2025-03-01T00:00:00Z",
-                "repo": {"full_name": "new/repo", "description": "", "html_url": "", "language": "Go", "topics": [], "stargazers_count": 5},
-            },
-            {
-                "starred_at": "2024-06-01T00:00:00Z",  # since(2025-01-01) 이전
-                "repo": {"full_name": "old/repo", "description": "", "html_url": "", "language": "Go", "topics": [], "stargazers_count": 5},
-            },
+        edges = [
+            _make_star_edge("new/repo", "2025-03-01T00:00:00Z"),
+            _make_star_edge("old/repo", "2024-06-01T00:00:00Z"),
         ]
-
-        client = FakeGitHubClient(rest_sequence=[page1])
+        client = FakeGitHubClient(graphql_responses=[
+            {"viewer": {"starredRepositories": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "edges": edges,
+            }}}
+        ])
 
         stars = extract_stars(client, tmp_path, "user", SINCE)
 

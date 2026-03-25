@@ -494,61 +494,82 @@ def extract_readmes(
 
 
 # ---------------------------------------------------------------------------
-# 5. Stars
+# 5. Stars (GraphQL)
 # ---------------------------------------------------------------------------
+
+_STARS_QUERY = """
+query($after: String) {
+  viewer {
+    starredRepositories(first: 100, after: $after, orderBy: {field: STARRED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      edges {
+        starredAt
+        node {
+          nameWithOwner
+          description
+          url
+          primaryLanguage { name }
+          stargazerCount
+          repositoryTopics(first: 10) { nodes { topic { name } } }
+        }
+      }
+    }
+  }
+}
+"""
 
 
 def extract_stars(
     client: GitHubClient, base: Path, login: str, since: datetime,
-    per_page: int = 100,
 ) -> list[dict]:
+    """GraphQL viewer.starredRepositories로 starred repos를 수집한다."""
     typer.echo("→  Extracting starred repositories…")
 
     by_month: dict[str, list[dict]] = defaultdict(list)
     all_stars: list[dict] = []
-    page = 1
-    star_headers = {"Accept": "application/vnd.github.star+json"}
+    cursor: Optional[str] = None
 
     while True:
-        data = client.rest(
-            f"/users/{login}/starred",
-            headers=star_headers,
-            per_page=per_page,
-            page=page,
-        )
+        variables: dict[str, Any] = {}
+        if cursor:
+            variables["after"] = cursor
 
-        if not isinstance(data, list) or not data:
+        data = client.graphql(_STARS_QUERY, variables)
+        if not data:
             break
 
+        starred = data["viewer"]["starredRepositories"]
+        edges = starred["edges"]
+
         reached_cutoff = False
-        for item in data:
-            starred_at_str = item.get("starred_at", "")
-            if not starred_at_str:
-                continue
+        for edge in edges:
+            starred_at_str = edge["starredAt"]
             starred_at = _iso_to_dt(starred_at_str)
 
             if starred_at < since:
                 reached_cutoff = True
                 break
 
-            starred_repo = item.get("repo", {})
-            topics = starred_repo.get("topics", [])
+            node = edge["node"]
+            lang = (node.get("primaryLanguage") or {}).get("name", "")
+            topics = [t["topic"]["name"] for t in (node.get("repositoryTopics") or {}).get("nodes", [])]
+
             entry = {
                 "starred_at": starred_at_str,
-                "name": starred_repo.get("full_name", ""),
-                "description": (starred_repo.get("description") or "").strip(),
-                "url": starred_repo.get("html_url", ""),
-                "language": starred_repo.get("language") or "",
+                "name": node.get("nameWithOwner", ""),
+                "description": (node.get("description") or "").strip(),
+                "url": node.get("url", ""),
+                "language": lang,
                 "topics": topics,
-                "stars": starred_repo.get("stargazers_count", 0),
+                "stars": node.get("stargazerCount", 0),
             }
             month = entry["starred_at"][:7]
             by_month[month].append(entry)
             all_stars.append(entry)
 
-        if reached_cutoff or len(data) < per_page:
+        if reached_cutoff or not starred["pageInfo"]["hasNextPage"]:
             break
-        page += 1
+        cursor = starred["pageInfo"]["endCursor"]
         time.sleep(client.rate_limit_delay)
 
     for month, entries in sorted(by_month.items()):

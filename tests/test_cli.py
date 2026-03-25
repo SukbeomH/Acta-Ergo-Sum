@@ -24,15 +24,23 @@ def _mock_subprocess_run(*args, **kwargs):
         return result
     # 기타 API 호출 — 빈 응답
     result = MagicMock()
-    result.stdout = json.dumps({"data": {"user": {
-        "repositories": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
-        "pullRequests": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
-        "issues": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
-        "contributionsCollection": {"pullRequestReviewContributions": {
-            "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [],
-        }},
-        "projectsV2": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
-    }}})
+    result.stdout = json.dumps({"data": {
+        "user": {
+            "repositories": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
+            "pullRequests": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
+            "issues": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
+            "contributionsCollection": {"pullRequestReviewContributions": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [],
+            }},
+            "projectsV2": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
+        },
+        "viewer": {
+            "starredRepositories": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "edges": [],
+            },
+        },
+    }})
     return result
 
 
