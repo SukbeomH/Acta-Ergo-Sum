@@ -16,6 +16,7 @@ env/
 
 # Output data (generated at runtime)
 acta_data/
+test_run/
 
 # uv
 uv.lock

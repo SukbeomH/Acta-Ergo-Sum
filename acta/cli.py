@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +43,22 @@ SUBDIRS = [
 ]
 
 
+def _read_last_run(meta_path: Path, fallback_days: int) -> datetime:
+    """metadata.json에서 generated_at을 읽어 since를 결정한다."""
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            generated_at = meta.get("generated_at", "")
+            if generated_at:
+                since = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+                typer.echo(f"    Last run: {since.strftime('%Y-%m-%d %H:%M')}")
+                return since
+        except (json.JSONDecodeError, ValueError, KeyError):
+            pass
+    typer.echo(f"    No previous run found. Using --days {fallback_days} as fallback.")
+    return datetime.now(timezone.utc) - timedelta(days=fallback_days)
+
+
 def _create_directories(base: Path) -> None:
     base.mkdir(parents=True, exist_ok=True)
     for sub in SUBDIRS:
@@ -60,12 +77,18 @@ def run(
     skip_contributed: bool = typer.Option(False, "--skip-contributed", help="Skip contributed repos extraction."),
     skip_issues: bool = typer.Option(False, "--skip-issues", help="Skip issue extraction."),
     skip_reviews: bool = typer.Option(False, "--skip-reviews", help="Skip code review extraction."),
+    since_last_run: bool = typer.Option(False, "--since-last-run", help="Only collect data since the last run."),
 ) -> None:
     """Collect GitHub activity and write to a markdown knowledge base."""
     base = Path(output)
-    since = datetime.now(timezone.utc) - timedelta(days=days)
 
-    typer.echo(f"🚀  Acta Ergo Sum — collecting {days} days of activity")
+    if since_last_run:
+        meta_path = base / "metadata.json"
+        since = _read_last_run(meta_path, days)
+    else:
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    typer.echo(f"🚀  Acta Ergo Sum — collecting activity")
     typer.echo(f"    Output: {base.resolve()}")
     typer.echo(f"    Since:  {since.strftime('%Y-%m-%d')}\n")
 

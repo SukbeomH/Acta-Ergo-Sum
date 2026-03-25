@@ -74,6 +74,35 @@ class TestCliRun:
         assert "Done!" in result.output
 
 
+class TestSinceLastRun:
+    @patch("subprocess.run", side_effect=_mock_subprocess_run)
+    def test_uses_metadata_generated_at(self, mock_run, tmp_path):
+        """--since-last-run 시 metadata.json의 generated_at을 since로 사용한다."""
+        output = str(tmp_path / "data")
+        # 1차 실행: metadata.json 생성
+        runner.invoke(app, ["run", "--days", "7", "--output", output, "--skip-readmes"])
+        assert (tmp_path / "data" / "metadata.json").exists()
+
+        # generated_at 확인
+        meta = json.loads((tmp_path / "data" / "metadata.json").read_text())
+        assert "generated_at" in meta
+
+        # 2차 실행: --since-last-run
+        result = runner.invoke(app, ["run", "--since-last-run", "--output", output, "--skip-readmes"])
+        assert result.exit_code == 0
+        assert "Done!" in result.output
+
+    @patch("subprocess.run", side_effect=_mock_subprocess_run)
+    def test_fallback_when_no_metadata(self, mock_run, tmp_path):
+        """metadata.json이 없으면 --days 기본값으로 fallback한다."""
+        output = str(tmp_path / "fresh")
+        result = runner.invoke(app, ["run", "--since-last-run", "--output", output, "--skip-readmes"])
+
+        assert result.exit_code == 0
+        assert "No previous run found" in result.output
+        assert "Done!" in result.output
+
+
 class TestCliWhoami:
     @patch("subprocess.run", side_effect=_mock_subprocess_run)
     def test_whoami_prints_username(self, mock_run):
