@@ -17,6 +17,12 @@ env/
 # Output data (generated at runtime)
 acta_data/
 
+# uv
+uv.lock
+
+# Pytest
+.pytest_cache/
+
 # Editor / OS
 .DS_Store
 .idea/
