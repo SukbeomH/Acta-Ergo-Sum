@@ -69,6 +69,8 @@ def _create_directories(base: Path) -> None:
 @app.command()
 def run(
     days: int = typer.Option(365, "--days", "-d", help="Number of past days to include."),
+    months: int = typer.Option(0, "--months", "-m", help="Number of past months (overrides --days if set)."),
+    years: int = typer.Option(0, "--years", "-y", help="Number of past years (overrides --days/--months if set)."),
     output: str = typer.Option("./acta_data", "--output", "-o", help="Output base directory."),
     skip_readmes: bool = typer.Option(False, "--skip-readmes", help="Skip README archival (faster)."),
     skip_commits: bool = typer.Option(False, "--skip-commits", help="Skip commit extraction."),
@@ -82,9 +84,15 @@ def run(
     """Collect GitHub activity and write to a markdown knowledge base."""
     base = Path(output)
 
+    # 기간 우선순위: --since-last-run > --years > --months > --days
     if since_last_run:
+        total_days = years * 365 + months * 30 + days if (years or months) else days
         meta_path = base / "metadata.json"
-        since = _read_last_run(meta_path, days)
+        since = _read_last_run(meta_path, total_days)
+    elif years:
+        since = datetime.now(timezone.utc) - timedelta(days=years * 365)
+    elif months:
+        since = datetime.now(timezone.utc) - timedelta(days=months * 30)
     else:
         since = datetime.now(timezone.utc) - timedelta(days=days)
 
