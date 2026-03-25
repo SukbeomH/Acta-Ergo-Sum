@@ -401,41 +401,57 @@ def extract_readmes(
 
 
 def extract_stars(
-    client: GitHubClient, base: Path, login: str, since: datetime
+    client: GitHubClient, base: Path, login: str, since: datetime,
+    per_page: int = 100,
 ) -> list[dict]:
     typer.echo("→  Extracting starred repositories…")
-    data = client.rest(f"/users/{login}/starred")
 
     by_month: dict[str, list[dict]] = defaultdict(list)
     all_stars: list[dict] = []
+    page = 1
+    star_headers = {"Accept": "application/vnd.github.star+json"}
 
-    if not isinstance(data, list):
-        typer.echo("✓  Stars: 0 starred repos across 0 months")
-        return []
+    while True:
+        data = client.rest(
+            f"/users/{login}/starred",
+            headers=star_headers,
+            per_page=per_page,
+            page=page,
+        )
 
-    for item in data:
-        starred_at_str = item.get("starred_at", "")
-        if not starred_at_str:
-            continue
-        starred_at = _iso_to_dt(starred_at_str)
+        if not isinstance(data, list) or not data:
+            break
 
-        if starred_at < since:
-            continue
+        reached_cutoff = False
+        for item in data:
+            starred_at_str = item.get("starred_at", "")
+            if not starred_at_str:
+                continue
+            starred_at = _iso_to_dt(starred_at_str)
 
-        starred_repo = item.get("repo", {})
-        topics = starred_repo.get("topics", [])
-        entry = {
-            "starred_at": starred_at_str,
-            "name": starred_repo.get("full_name", ""),
-            "description": (starred_repo.get("description") or "").strip(),
-            "url": starred_repo.get("html_url", ""),
-            "language": starred_repo.get("language") or "",
-            "topics": topics,
-            "stars": starred_repo.get("stargazers_count", 0),
-        }
-        month = entry["starred_at"][:7]
-        by_month[month].append(entry)
-        all_stars.append(entry)
+            if starred_at < since:
+                reached_cutoff = True
+                break
+
+            starred_repo = item.get("repo", {})
+            topics = starred_repo.get("topics", [])
+            entry = {
+                "starred_at": starred_at_str,
+                "name": starred_repo.get("full_name", ""),
+                "description": (starred_repo.get("description") or "").strip(),
+                "url": starred_repo.get("html_url", ""),
+                "language": starred_repo.get("language") or "",
+                "topics": topics,
+                "stars": starred_repo.get("stargazers_count", 0),
+            }
+            month = entry["starred_at"][:7]
+            by_month[month].append(entry)
+            all_stars.append(entry)
+
+        if reached_cutoff or len(data) < per_page:
+            break
+        page += 1
+        time.sleep(client.rate_limit_delay)
 
     for month, entries in sorted(by_month.items()):
         frontmatter: dict[str, Any] = {

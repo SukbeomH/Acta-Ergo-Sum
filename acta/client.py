@@ -14,9 +14,14 @@ class GitHubClient:
     def __init__(self, rate_limit_delay: float = 0.3):
         self.rate_limit_delay = rate_limit_delay
 
-    def rest(self, endpoint: str, retries: int = 3, delay: float = 5.0, **params: Any) -> Any:
+    def rest(
+        self, endpoint: str, retries: int = 3, delay: float = 5.0,
+        headers: dict[str, str] | None = None, **params: Any,
+    ) -> Any:
         """REST API 호출. 재시도 + rate limit 처리."""
         cmd = ["gh", "api", endpoint]
+        for name, value in (headers or {}).items():
+            cmd += ["--header", f"{name}: {value}"]
         for key, value in params.items():
             cmd += ["-F", f"{key}={value}"]
 

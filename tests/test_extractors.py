@@ -20,13 +20,25 @@ from acta.extractors import (
 class FakeGitHubClient(GitHubClient):
     """테스트용 클라이언트 — 미리 정의된 응답을 반환한다."""
 
-    def __init__(self, rest_responses: dict | None = None, graphql_responses: list | None = None):
+    def __init__(
+        self,
+        rest_responses: dict | None = None,
+        graphql_responses: list | None = None,
+        rest_sequence: list | None = None,
+    ):
         super().__init__(rate_limit_delay=0)
         self._rest_responses = rest_responses or {}
         self._graphql_responses = list(graphql_responses or [])
         self._graphql_call_index = 0
+        self._rest_sequence = list(rest_sequence or [])
+        self._rest_call_index = 0
 
-    def rest(self, endpoint: str, **params) -> dict | list | None:
+    def rest(self, endpoint: str, headers: dict | None = None, **params) -> dict | list | None:
+        # rest_sequence가 있으면 순차 반환 (페이지네이션 테스트용)
+        if self._rest_sequence and self._rest_call_index < len(self._rest_sequence):
+            resp = self._rest_sequence[self._rest_call_index]
+            self._rest_call_index += 1
+            return resp
         return self._rest_responses.get(endpoint)
 
     def graphql(self, query: str, variables: dict) -> dict | None:
@@ -308,6 +320,54 @@ class TestExtractStars:
 
         stars = extract_stars(client, tmp_path, "user", SINCE)
         assert len(stars) == 0
+
+    def test_paginates_multiple_pages(self, tmp_path: Path):
+        """여러 페이지를 순회하여 모든 starred repos를 수집한다."""
+        def _star(name: str, date: str):
+            return {
+                "starred_at": date,
+                "repo": {
+                    "full_name": name,
+                    "description": f"Desc of {name}",
+                    "html_url": f"https://github.com/{name}",
+                    "language": "Python",
+                    "topics": [],
+                    "stargazers_count": 10,
+                },
+            }
+
+        # 페이지 1: per_page개 (꽉 참 → 다음 페이지 있음)
+        # 페이지 2: per_page 미만 (마지막 페이지)
+        page1 = [_star("a/repo1", "2025-03-01T00:00:00Z")]
+        page2 = [_star("b/repo2", "2025-02-01T00:00:00Z")]
+
+        client = FakeGitHubClient(rest_sequence=[page1, page2])
+
+        stars = extract_stars(client, tmp_path, "user", SINCE, per_page=1)
+
+        assert len(stars) == 2
+        assert stars[0]["name"] == "a/repo1"
+        assert stars[1]["name"] == "b/repo2"
+
+    def test_stops_pagination_at_since_cutoff(self, tmp_path: Path):
+        """since 이전의 star를 만나면 페이지네이션을 중단한다."""
+        page1 = [
+            {
+                "starred_at": "2025-03-01T00:00:00Z",
+                "repo": {"full_name": "new/repo", "description": "", "html_url": "", "language": "Go", "topics": [], "stargazers_count": 5},
+            },
+            {
+                "starred_at": "2024-06-01T00:00:00Z",  # since(2025-01-01) 이전
+                "repo": {"full_name": "old/repo", "description": "", "html_url": "", "language": "Go", "topics": [], "stargazers_count": 5},
+            },
+        ]
+
+        client = FakeGitHubClient(rest_sequence=[page1])
+
+        stars = extract_stars(client, tmp_path, "user", SINCE)
+
+        assert len(stars) == 1
+        assert stars[0]["name"] == "new/repo"
 
 
 # ---------------------------------------------------------------------------
