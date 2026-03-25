@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["title", "tags", "type", "created"],
+  "properties": {
+    "title": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "type": { "type": "string" },
+    "created": { "type": "string", "format": "date-time" },
+    "contextual_description": { "type": "string" },
+    "keywords": { "type": "array", "items": { "type": "string" } },
+    "related": { "type": "array", "items": { "type": "string" } }
+  }
+}
