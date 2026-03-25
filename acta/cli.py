@@ -159,6 +159,62 @@ def run(
 
 
 @app.command()
+def analyze(
+    template: str = typer.Option(..., "--template", "-t", help="Template name (e.g. profile, weekly, resume)."),
+    input_dir: str = typer.Option("./acta_data", "--input", "-i", help="Input data directory."),
+    call_api: bool = typer.Option(False, "--call-api", help="Call Claude API to generate result."),
+    template_dir: str = typer.Option("./templates", "--template-dir", help="Templates directory."),
+) -> None:
+    """Analyze collected data using LLM prompt templates."""
+    from acta.analyzer import build_prompt, call_api as api_call, list_templates, load_template
+
+    data_dir = Path(input_dir)
+    tmpl_dir = Path(template_dir)
+    tmpl_path = tmpl_dir / f"{template}.md"
+
+    if not tmpl_path.exists():
+        available = list_templates(tmpl_dir)
+        typer.echo(f"✗  Template '{template}' not found.", err=True)
+        if available:
+            typer.echo(f"   Available: {', '.join(available)}", err=True)
+        raise typer.Exit(code=1)
+
+    if not data_dir.exists():
+        typer.echo(f"✗  Data directory '{data_dir}' not found. Run `acta run` first.", err=True)
+        raise typer.Exit(code=1)
+
+    meta, body = load_template(tmpl_path)
+    context_files = meta.get("context", [])
+    max_tokens = meta.get("max_tokens", 4096)
+
+    typer.echo(f"📝  Template: {meta.get('name', template)}")
+    typer.echo(f"    Description: {meta.get('description', '')}")
+    typer.echo(f"    Context files: {', '.join(context_files)}")
+
+    prompt = build_prompt(body, context_files, data_dir)
+
+    # Save prompt
+    analysis_dir = data_dir / "analysis"
+    analysis_dir.mkdir(exist_ok=True)
+    prompt_path = analysis_dir / f"{template}.prompt.md"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    typer.echo(f"✓  Prompt saved: {prompt_path}")
+
+    if call_api:
+        typer.echo("🤖  Calling Claude API…")
+        try:
+            result = api_call(prompt, max_tokens=max_tokens)
+            result_path = analysis_dir / f"{template}.result.md"
+            result_path.write_text(result, encoding="utf-8")
+            typer.echo(f"✓  Result saved: {result_path}")
+        except RuntimeError as e:
+            typer.echo(f"✗  {e}", err=True)
+            raise typer.Exit(code=1)
+    else:
+        typer.echo(f"\n💡  To generate with Claude API, add --call-api")
+
+
+@app.command()
 def whoami() -> None:
     """Print the currently authenticated GitHub user."""
     client = GitHubClient()
