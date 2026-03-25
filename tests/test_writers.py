@@ -4,7 +4,7 @@ import csv
 import json
 from pathlib import Path
 
-from acta.writers import generate_metadata, generate_timeline, write_md
+from acta.writers import generate_metadata, generate_summary, generate_timeline, write_md
 
 
 class TestWriteMd:
@@ -139,3 +139,47 @@ class TestGenerateTimeline:
             csv_rows = list(reader)
         assert len(csv_rows) == 3
         assert csv_rows[0]["category"] == "PR"
+
+
+class TestGenerateSummary:
+    def test_writes_summary_md(self, tmp_path: Path):
+        """SUMMARY.md가 올바른 섹션 구조로 생성된다."""
+        repos = [
+            {"name": "repo-a", "primaryLanguage": {"name": "Python"}},
+            {"name": "repo-b", "primaryLanguage": {"name": "Go"}},
+        ]
+        commits = [
+            {"date": "2025-01-15T10:00:00Z", "repo": "repo-a", "message": "fix", "sha": "abc1234"},
+            {"date": "2025-02-01T10:00:00Z", "repo": "repo-a", "message": "feat", "sha": "def5678"},
+        ]
+        prs = [
+            {"createdAt": "2025-02-01T00:00:00Z", "state": "MERGED", "title": "Add X",
+             "repository": {"nameWithOwner": "user/repo-a"}, "number": 1},
+        ]
+
+        generate_summary(
+            base=tmp_path, login="testuser", days=90,
+            repos=repos, commits=commits, prs=prs,
+            issues=[], reviews=[], stars=[], projects=[], orgs=[],
+        )
+
+        summary_path = tmp_path / "SUMMARY.md"
+        assert summary_path.exists()
+        content = summary_path.read_text()
+        assert "testuser" in content
+        assert "## Overview" in content
+        assert "## Monthly Activity" in content
+        assert "## Top Languages" in content
+
+    def test_handles_empty_data(self, tmp_path: Path):
+        """모든 데이터가 비어있어도 정상 생성된다."""
+        generate_summary(
+            base=tmp_path, login="empty", days=30,
+            repos=[], commits=[], prs=[],
+            issues=[], reviews=[], stars=[], projects=[], orgs=[],
+        )
+
+        summary_path = tmp_path / "SUMMARY.md"
+        assert summary_path.exists()
+        content = summary_path.read_text()
+        assert "empty" in content

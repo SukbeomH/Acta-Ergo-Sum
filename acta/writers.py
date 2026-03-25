@@ -142,6 +142,97 @@ def generate_timeline(
     return rows
 
 
+def generate_summary(
+    base: Path,
+    login: str,
+    days: int,
+    repos: list[dict],
+    commits: list[dict],
+    prs: list[dict],
+    issues: list[dict],
+    reviews: list[dict],
+    stars: list[dict],
+    projects: list[dict],
+    orgs: list[dict],
+) -> None:
+    """Write SUMMARY.md — LLM/사람이 한눈에 파악하는 활동 리포트."""
+    lines = [
+        f"# GitHub Activity Summary — {login}",
+        "",
+        f"Period: last {days} days",
+        "",
+        "## Overview",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        f"| Repositories | {len(repos)} |",
+        f"| Commits | {len(commits)} |",
+        f"| Pull Requests | {len(prs)} |",
+        f"| Issues | {len(issues)} |",
+        f"| Code Reviews | {len(reviews)} |",
+        f"| Stars | {len(stars)} |",
+        f"| Projects | {len(projects)} |",
+        f"| Organizations | {len(orgs)} |",
+        "",
+    ]
+
+    # Monthly Activity
+    monthly: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for c in commits:
+        monthly[c["date"][:7]]["commits"] += 1
+    for pr in prs:
+        monthly[pr["createdAt"][:7]]["prs"] += 1
+    for issue in issues:
+        monthly[issue["createdAt"][:7]]["issues"] += 1
+    for r in reviews:
+        monthly[r["date"][:7]]["reviews"] += 1
+
+    lines.append("## Monthly Activity")
+    lines.append("")
+    if monthly:
+        lines.append("| Month | Commits | PRs | Issues | Reviews |")
+        lines.append("|---|---|---|---|---|")
+        for month in sorted(monthly.keys()):
+            m = monthly[month]
+            lines.append(f"| {month} | {m['commits']} | {m['prs']} | {m['issues']} | {m['reviews']} |")
+    else:
+        lines.append("No activity recorded.")
+    lines.append("")
+
+    # Top Languages
+    langs = _top_languages(repos)
+    lines.append("## Top Languages")
+    lines.append("")
+    if langs:
+        for lang, count in langs.items():
+            lines.append(f"- **{lang}**: {count} repos")
+    else:
+        lines.append("No language data.")
+    lines.append("")
+
+    # Most Active Repos
+    repo_commits: dict[str, int] = defaultdict(int)
+    for c in commits:
+        repo_commits[c["repo"]] += 1
+    if repo_commits:
+        lines.append("## Most Active Repositories")
+        lines.append("")
+        for repo, count in sorted(repo_commits.items(), key=lambda x: -x[1])[:10]:
+            lines.append(f"- **{repo}**: {count} commits")
+        lines.append("")
+
+    # Recent PRs
+    if prs:
+        lines.append("## Recent Pull Requests")
+        lines.append("")
+        for pr in sorted(prs, key=lambda x: x["createdAt"], reverse=True)[:10]:
+            repo = pr["repository"]["nameWithOwner"]
+            lines.append(f"- [{pr['state']}] **{repo}** #{pr.get('number', '')} {pr['title']}")
+        lines.append("")
+
+    (base / "SUMMARY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _top_languages(repos: list[dict]) -> dict[str, int]:
     counts: dict[str, int] = defaultdict(int)
     for repo in repos:

@@ -21,7 +21,7 @@ from acta.extractors import (
     extract_reviews,
     extract_stars,
 )
-from acta.writers import generate_metadata, generate_timeline
+from acta.writers import generate_metadata, generate_summary, generate_timeline
 
 app = typer.Typer(
     name="acta",
@@ -129,6 +129,8 @@ def run(
 
     generate_metadata(base, login, days, repos, commits, prs, stars, projects, orgs, SUBDIRS, issues=issues, reviews=reviews)
     generate_timeline(base, commits, prs, stars, issues=issues, reviews=reviews)
+    generate_summary(base, login, days, repos, commits, prs, issues, reviews, stars, projects, orgs)
+    typer.echo("✓  SUMMARY.md written")
 
     typer.echo("\n✅  Done! Knowledge base is ready.")
 
