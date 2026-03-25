@@ -11,6 +11,8 @@ import typer
 from acta.client import GitHubClient
 from acta.extractors import (
     extract_commits,
+    extract_contributed_repos,
+    extract_issues,
     extract_organizations,
     extract_projects,
     extract_pull_requests,
@@ -30,6 +32,7 @@ SUBDIRS = [
     "repositories",
     "commits",
     "pull_requests",
+    "issues",
     "readmes",
     "stars",
     "projects",
@@ -52,6 +55,8 @@ def run(
     skip_commits: bool = typer.Option(False, "--skip-commits", help="Skip commit extraction."),
     skip_prs: bool = typer.Option(False, "--skip-prs", help="Skip pull request extraction."),
     skip_stars: bool = typer.Option(False, "--skip-stars", help="Skip star extraction."),
+    skip_contributed: bool = typer.Option(False, "--skip-contributed", help="Skip contributed repos extraction."),
+    skip_issues: bool = typer.Option(False, "--skip-issues", help="Skip issue extraction."),
 ) -> None:
     """Collect GitHub activity and write to a markdown knowledge base."""
     base = Path(output)
@@ -77,6 +82,13 @@ def run(
     repos = extract_repositories(client, base, login, since)
     typer.echo("")
 
+    contributed: list[dict] = []
+    if not skip_contributed:
+        owner_names = {r["name"] for r in repos}
+        contributed = extract_contributed_repos(client, base, login, since, exclude_names=owner_names)
+        repos = repos + contributed
+        typer.echo("")
+
     commits: list[dict] = []
     if not skip_commits:
         commits = extract_commits(client, base, login, repos, since)
@@ -85,6 +97,11 @@ def run(
     prs: list[dict] = []
     if not skip_prs:
         prs = extract_pull_requests(client, base, login, since)
+        typer.echo("")
+
+    issues: list[dict] = []
+    if not skip_issues:
+        issues = extract_issues(client, base, login, since)
         typer.echo("")
 
     if not skip_readmes:
@@ -102,8 +119,8 @@ def run(
     orgs = extract_organizations(client, base, login)
     typer.echo("")
 
-    generate_metadata(base, login, days, repos, commits, prs, stars, projects, orgs, SUBDIRS)
-    generate_timeline(base, commits, prs, stars)
+    generate_metadata(base, login, days, repos, commits, prs, stars, projects, orgs, SUBDIRS, issues=issues)
+    generate_timeline(base, commits, prs, stars, issues=issues)
 
     typer.echo("\n✅  Done! Knowledge base is ready.")
 

@@ -8,6 +8,8 @@ import pytest
 from acta.client import GitHubClient
 from acta.extractors import (
     extract_commits,
+    extract_contributed_repos,
+    extract_issues,
     extract_organizations,
     extract_projects,
     extract_pull_requests,
@@ -113,6 +115,49 @@ class TestExtractRepositories:
 
         repos = extract_repositories(client, tmp_path, "user", SINCE)
         assert len(repos) == 2
+
+
+# ---------------------------------------------------------------------------
+# extract_contributed_repos
+# ---------------------------------------------------------------------------
+
+
+class TestExtractContributedRepos:
+    def test_fetches_collaborator_repos(self, tmp_path: Path):
+        """COLLABORATOR/ORG_MEMBER affiliation 레포를 반환한다."""
+        nodes = [_make_repo_node("org-project", language="TypeScript")]
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"repositories": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": nodes,
+            }}}
+        ])
+
+        repos = extract_contributed_repos(client, tmp_path, "user", SINCE, exclude_names=set())
+
+        assert len(repos) == 1
+        assert repos[0]["name"] == "org-project"
+        assert (tmp_path / "repositories" / "org-project.md").exists()
+
+    def test_excludes_already_owned_repos(self, tmp_path: Path):
+        """이미 OWNER로 수집된 레포를 중복 제외한다."""
+        nodes = [
+            _make_repo_node("my-repo"),
+            _make_repo_node("org-only"),
+        ]
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"repositories": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": nodes,
+            }}}
+        ])
+
+        repos = extract_contributed_repos(
+            client, tmp_path, "user", SINCE, exclude_names={"my-repo"}
+        )
+
+        assert len(repos) == 1
+        assert repos[0]["name"] == "org-only"
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +413,111 @@ class TestExtractStars:
 
         assert len(stars) == 1
         assert stars[0]["name"] == "new/repo"
+
+
+# ---------------------------------------------------------------------------
+# extract_issues
+# ---------------------------------------------------------------------------
+
+
+class TestExtractIssues:
+    def test_writes_issue_files_grouped_by_month(self, tmp_path: Path):
+        """이슈를 월별 MD 파일로 그룹핑하여 생성한다."""
+        issue_nodes = [
+            {
+                "number": 10,
+                "title": "Bug report",
+                "state": "OPEN",
+                "createdAt": "2025-02-15T00:00:00Z",
+                "closedAt": None,
+                "url": "https://github.com/user/repo/issues/10",
+                "body": "Something is broken",
+                "repository": {"nameWithOwner": "user/repo"},
+                "labels": {"nodes": [{"name": "bug"}]},
+                "comments": {"nodes": []},
+            },
+            {
+                "number": 11,
+                "title": "Feature request",
+                "state": "CLOSED",
+                "createdAt": "2025-01-05T00:00:00Z",
+                "closedAt": "2025-01-20T00:00:00Z",
+                "url": "https://github.com/user/repo/issues/11",
+                "body": "Please add X",
+                "repository": {"nameWithOwner": "user/repo"},
+                "labels": {"nodes": [{"name": "enhancement"}]},
+                "comments": {"nodes": []},
+            },
+        ]
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"issues": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": issue_nodes,
+            }}}
+        ])
+
+        issues = extract_issues(client, tmp_path, "user", SINCE)
+
+        assert len(issues) == 2
+        assert (tmp_path / "issues" / "2025-02.md").exists()
+        assert (tmp_path / "issues" / "2025-01.md").exists()
+
+        content = (tmp_path / "issues" / "2025-02.md").read_text()
+        assert "Bug report" in content
+        assert "bug" in content
+
+    def test_stops_at_since_cutoff(self, tmp_path: Path):
+        """since 이전의 이슈는 수집하지 않는다."""
+        old_issue = {
+            "number": 1,
+            "title": "Old issue",
+            "state": "CLOSED",
+            "createdAt": "2024-06-01T00:00:00Z",
+            "closedAt": "2024-06-02T00:00:00Z",
+            "url": "https://github.com/user/repo/issues/1",
+            "body": "",
+            "repository": {"nameWithOwner": "user/repo"},
+            "labels": {"nodes": []},
+            "comments": {"nodes": []},
+        }
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"issues": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [old_issue],
+            }}}
+        ])
+
+        issues = extract_issues(client, tmp_path, "user", SINCE)
+        assert len(issues) == 0
+
+    def test_includes_comments_in_body(self, tmp_path: Path):
+        """이슈 코멘트가 MD body에 포함된다."""
+        issue = {
+            "number": 5,
+            "title": "Discussion",
+            "state": "OPEN",
+            "createdAt": "2025-03-01T00:00:00Z",
+            "closedAt": None,
+            "url": "https://github.com/user/repo/issues/5",
+            "body": "Main topic",
+            "repository": {"nameWithOwner": "user/repo"},
+            "labels": {"nodes": []},
+            "comments": {"nodes": [
+                {"body": "I agree", "createdAt": "2025-03-02T00:00:00Z", "author": {"login": "commenter"}},
+            ]},
+        }
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"issues": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [issue],
+            }}}
+        ])
+
+        issues = extract_issues(client, tmp_path, "user", SINCE)
+
+        content = (tmp_path / "issues" / "2025-03.md").read_text()
+        assert "I agree" in content
+        assert "commenter" in content
 
 
 # ---------------------------------------------------------------------------

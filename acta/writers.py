@@ -42,6 +42,7 @@ def generate_metadata(
     projects: list[dict],
     orgs: list[dict],
     subdirs: list[str],
+    issues: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Write metadata.json and return the metadata dict."""
     meta = {
@@ -52,6 +53,7 @@ def generate_metadata(
             "repositories": len(repos),
             "commits": len(commits),
             "pull_requests": len(prs),
+            "issues": len(issues or []),
             "stars": len(stars),
             "projects": len(projects),
             "organizations": len(orgs),
@@ -71,6 +73,7 @@ def generate_timeline(
     commits: list[dict],
     prs: list[dict],
     stars: list[dict],
+    issues: list[dict] | None = None,
 ) -> list[dict[str, str]]:
     """Write timeline.csv and return the rows."""
     rows: list[dict[str, str]] = []
@@ -92,6 +95,16 @@ def generate_timeline(
                 "category": "PR",
                 "repository": pr["repository"]["nameWithOwner"],
                 "action": f"[{pr['state']}] {pr['title'][:120]}",
+            }
+        )
+
+    for issue in (issues or []):
+        rows.append(
+            {
+                "date": issue["createdAt"][:10],
+                "category": "Issue",
+                "repository": issue["repository"]["nameWithOwner"],
+                "action": f"[{issue['state']}] {issue['title'][:120]}",
             }
         )
 
