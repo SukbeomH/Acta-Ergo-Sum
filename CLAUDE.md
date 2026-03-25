@@ -9,29 +9,43 @@ This file provides guidance to Claude Code when working with this repository.
 ## Commands
 
 ```bash
-# 실행
-uv run python app.py run --days 365
-uv run python app.py whoami
-
-# 테스트
-uv run pytest tests/ -v
-
-# 의존성
-uv sync
-uv add <package>
+uv run python app.py run --days 365    # 데이터 수집
+uv run python app.py whoami            # 인증 사용자 확인
+uv run pytest tests/ -v                # 테스트 실행
+uv sync                                # 의존성 설치
+uv add <package>                       # 패키지 추가
 ```
 
 ## Architecture
 
 ```
-acta/                  # 메인 패키지
+acta/
 ├── client.py          # GitHubClient (gh CLI 래핑, REST/GraphQL)
-├── extractors.py      # extract_* 함수 (client 주입)
-├── writers.py         # write_md, generate_metadata, generate_timeline
+├── extractors.py      # 10개 extract_* 함수 (client DI)
+├── writers.py         # write_md, generate_metadata/timeline/summary
 └── cli.py             # Typer CLI (run, whoami)
-tests/                 # pytest 테스트
+tests/
+├── test_client.py     # GitHubClient 단위 (9)
+├── test_extractors.py # FakeClient 기반 추출기 (20)
+├── test_writers.py    # 출력 함수 (10)
+└── test_cli.py        # CLI 통합 (4)
 app.py                 # 진입점
 ```
+
+## Extractors
+
+| 함수 | API | 출력 |
+|---|---|---|
+| `extract_repositories` | GraphQL (OWNER) | `repositories/*.md` |
+| `extract_contributed_repos` | GraphQL (COLLABORATOR/ORG) | `repositories/*.md` |
+| `extract_commits` | GraphQL | `commits/YYYY-MM.md` |
+| `extract_pull_requests` | GraphQL | `pull_requests/*.md` |
+| `extract_issues` | GraphQL | `issues/YYYY-MM.md` |
+| `extract_reviews` | GraphQL (contributionsCollection) | `reviews/YYYY-MM.md` |
+| `extract_stars` | REST (paginated) | `stars/YYYY-MM.md` |
+| `extract_readmes` | REST | `readmes/*_readme.md` |
+| `extract_projects` | GraphQL | `projects/*.md` |
+| `extract_organizations` | REST | `organizations/*.md` |
 
 ## Conventions
 
@@ -42,16 +56,10 @@ app.py                 # 진입점
 
 ## HXSK
 
-- **Hook System**: `.hxsk/hooks/` (settings.json에서 참조)
-- **Skills**: `.claude/skills/{name}/SKILL.md`
-- **Memories**: `.hxsk/memories/` (파일 기반 A-Mem)
+- **Hooks**: `.hxsk/hooks/` — session-start, file-protect, bash-guard, track-modifications, pre-compact-save, stop-context-save
+- **Skills**: `.claude/skills/{name}/SKILL.md` — planner, executor, verifier, memory-protocol, commit, handoff
+- **Memories**: `.hxsk/memories/` — 파일 기반 A-Mem (17 types)
 - **Events**: SessionStart, PreToolUse, PostToolUse, PreCompact, Stop
-
-### Compaction Rules
-압축 시 보존:
-- `.hxsk/.track-modifications.log` 변경 파일 목록
-- 활성 태스크 컨텍스트
-- 메모리 검색 결과
 
 ### Agent Boundaries
 - `--dangerously-skip-permissions` 사용 금지
