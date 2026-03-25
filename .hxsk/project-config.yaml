@@ -1,0 +1,16 @@
+# HXSK Project Configuration
+project:
+  name: acta-ergo-sum
+  type: cli-tool
+  language: python
+
+package_manager:
+  name: uv
+
+test:
+  framework: pytest
+  command: "uv run pytest tests/ -v"
+
+git:
+  default_branch: master
+  commit_style: conventional

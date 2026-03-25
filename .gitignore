@@ -17,6 +17,19 @@ env/
 # Output data (generated at runtime)
 acta_data/
 
+# uv
+uv.lock
+
+# Pytest
+.pytest_cache/
+
+# HXSK temp files
+.hxsk/.modified-this-session
+.hxsk/.track-modifications.log
+.hxsk/.context-save.log
+.hxsk/*.pre-compact.bak
+.hxsk/CURRENT.md
+
 # Editor / OS
 .DS_Store
 .idea/

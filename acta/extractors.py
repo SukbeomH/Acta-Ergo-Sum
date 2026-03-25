@@ -1,0 +1,578 @@
+"""GitHub 데이터 추출 함수들 — GitHubClient를 주입받는다."""
+
+from __future__ import annotations
+
+import base64
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+import typer
+
+from acta.client import GitHubClient
+from acta.writers import write_md
+
+# ---------------------------------------------------------------------------
+# GraphQL Queries
+# ---------------------------------------------------------------------------
+
+_REPO_QUERY = """
+query($login: String!, $after: String) {
+  user(login: $login) {
+    repositories(
+      first: 100
+      after: $after
+      orderBy: {field: UPDATED_AT, direction: DESC}
+      ownerAffiliations: [OWNER]
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        name
+        description
+        url
+        createdAt
+        updatedAt
+        pushedAt
+        primaryLanguage { name }
+        repositoryTopics(first: 20) { nodes { topic { name } } }
+        isFork
+        isPrivate
+        stargazerCount
+        forkCount
+        defaultBranchRef { name }
+      }
+    }
+  }
+}
+"""
+
+_COMMIT_QUERY = """
+query($owner: String!, $name: String!, $since: GitTimestamp!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef {
+      target {
+        ... on Commit {
+          history(first: 100, after: $after, since: $since) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              oid
+              message
+              committedDate
+              author { name email user { login } }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+_PR_QUERY = """
+query($login: String!, $after: String) {
+  user(login: $login) {
+    pullRequests(
+      first: 50
+      after: $after
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        state
+        createdAt
+        mergedAt
+        closedAt
+        url
+        body
+        repository { nameWithOwner }
+        reviews(first: 20) {
+          nodes {
+            state
+            body
+            createdAt
+            author { login }
+          }
+        }
+        comments(first: 10) {
+          nodes {
+            body
+            createdAt
+            author { login }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _iso_to_dt(iso: str) -> datetime:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+# ---------------------------------------------------------------------------
+# 1. Repositories
+# ---------------------------------------------------------------------------
+
+
+def extract_repositories(
+    client: GitHubClient, base: Path, login: str, since: datetime
+) -> list[dict]:
+    typer.echo("→  Extracting repositories…")
+    cursor: Optional[str] = None
+    repos: list[dict] = []
+    page = 0
+
+    while True:
+        variables: dict[str, Any] = {"login": login}
+        if cursor:
+            variables["after"] = cursor
+
+        data = client.graphql(_REPO_QUERY, variables)
+        if not data:
+            break
+
+        page_data = data["user"]["repositories"]
+        nodes = page_data["nodes"]
+        repos.extend(nodes)
+        page += 1
+        typer.echo(f"   page {page}: {len(nodes)} repos")
+
+        if not page_data["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page_data["pageInfo"]["endCursor"]
+        time.sleep(client.rate_limit_delay)
+
+    written = 0
+    for repo in repos:
+        topics = [n["topic"]["name"] for n in repo.get("repositoryTopics", {}).get("nodes", [])]
+        lang = repo.get("primaryLanguage") or {}
+        branch = repo.get("defaultBranchRef") or {}
+
+        frontmatter: dict[str, Any] = {
+            "name": repo["name"],
+            "url": repo["url"],
+            "created_at": repo["createdAt"],
+            "updated_at": repo["updatedAt"],
+            "pushed_at": repo.get("pushedAt", ""),
+            "language": lang.get("name", ""),
+            "topics": topics,
+            "is_fork": repo["isFork"],
+            "is_private": repo["isPrivate"],
+            "stars": repo["stargazerCount"],
+            "forks": repo["forkCount"],
+            "default_branch": branch.get("name", "main"),
+        }
+        desc = repo.get("description") or ""
+        body = f"## {repo['name']}\n\n{desc}" if desc else f"## {repo['name']}"
+        write_md(base / "repositories" / f"{repo['name']}.md", frontmatter, body)
+        written += 1
+
+    typer.echo(f"✓  Repositories: {written} files written")
+    return repos
+
+
+# ---------------------------------------------------------------------------
+# 2. Commits
+# ---------------------------------------------------------------------------
+
+
+def extract_commits(
+    client: GitHubClient, base: Path, login: str, repos: list[dict], since: datetime
+) -> list[dict]:
+    typer.echo("→  Extracting commits…")
+    since_iso = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    by_month: dict[str, list[dict]] = defaultdict(list)
+    all_commits: list[dict] = []
+
+    for repo in repos:
+        repo_name = repo["name"]
+        if repo.get("isFork"):
+            continue
+
+        cursor: Optional[str] = None
+        while True:
+            variables: dict[str, Any] = {
+                "owner": login,
+                "name": repo_name,
+                "since": since_iso,
+            }
+            if cursor:
+                variables["after"] = cursor
+
+            data = client.graphql(_COMMIT_QUERY, variables)
+            if not data:
+                break
+
+            default_ref = data.get("repository", {}).get("defaultBranchRef")
+            if not default_ref:
+                break
+            history = default_ref["target"]["history"]
+            nodes = history["nodes"]
+
+            for node in nodes:
+                author = node.get("author") or {}
+                user = author.get("user") or {}
+                if user.get("login", "").lower() != login.lower():
+                    continue
+                month = node["committedDate"][:7]
+                entry = {
+                    "repo": repo_name,
+                    "sha": node["oid"][:7],
+                    "message": node["message"].split("\n")[0],
+                    "date": node["committedDate"],
+                }
+                by_month[month].append(entry)
+                all_commits.append(entry)
+
+            if not history["pageInfo"]["hasNextPage"]:
+                break
+            cursor = history["pageInfo"]["endCursor"]
+            time.sleep(client.rate_limit_delay)
+
+        time.sleep(client.rate_limit_delay)
+
+    for month, entries in sorted(by_month.items()):
+        frontmatter: dict[str, Any] = {
+            "period": month,
+            "category": "commits",
+            "total": len(entries),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lines = [f"## Commits — {month}", ""]
+        for e in sorted(entries, key=lambda x: x["date"]):
+            lines.append(f"- `{e['date'][:10]}` **{e['repo']}** `{e['sha']}` {e['message']}")
+        write_md(base / "commits" / f"{month}.md", frontmatter, "\n".join(lines))
+
+    typer.echo(f"✓  Commits: {len(all_commits)} commits across {len(by_month)} months")
+    return all_commits
+
+
+# ---------------------------------------------------------------------------
+# 3. Pull Requests & Reviews
+# ---------------------------------------------------------------------------
+
+
+def extract_pull_requests(
+    client: GitHubClient, base: Path, login: str, since: datetime
+) -> list[dict]:
+    typer.echo("→  Extracting pull requests…")
+    cursor: Optional[str] = None
+    prs: list[dict] = []
+    page = 0
+
+    while True:
+        variables: dict[str, Any] = {"login": login}
+        if cursor:
+            variables["after"] = cursor
+
+        data = client.graphql(_PR_QUERY, variables)
+        if not data:
+            break
+
+        page_data = data["user"]["pullRequests"]
+        nodes = page_data["nodes"]
+
+        reached_cutoff = False
+        for node in nodes:
+            created = _iso_to_dt(node["createdAt"])
+            if created < since:
+                reached_cutoff = True
+                break
+            prs.append(node)
+
+        page += 1
+        typer.echo(f"   page {page}: {len(prs)} PRs so far")
+
+        if reached_cutoff or not page_data["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page_data["pageInfo"]["endCursor"]
+        time.sleep(client.rate_limit_delay)
+
+    for pr in prs:
+        repo_name = pr["repository"]["nameWithOwner"].replace("/", "_")
+        state = pr["state"]
+        merged = "true" if pr.get("mergedAt") else "false"
+
+        frontmatter: dict[str, Any] = {
+            "pr_number": pr["number"],
+            "title": pr["title"],
+            "repository": pr["repository"]["nameWithOwner"],
+            "state": state,
+            "merged": merged,
+            "created_at": pr["createdAt"],
+            "merged_at": pr.get("mergedAt", ""),
+            "closed_at": pr.get("closedAt", ""),
+            "url": pr["url"],
+            "category": "pull_request",
+        }
+
+        body_lines = [
+            f"## PR #{pr['number']}: {pr['title']}",
+            "",
+            f"**Repository:** {pr['repository']['nameWithOwner']}  ",
+            f"**State:** {state}  ",
+            f"**Created:** {pr['createdAt'][:10]}",
+        ]
+        if pr.get("mergedAt"):
+            body_lines.append(f"**Merged:** {pr['mergedAt'][:10]}")
+
+        if pr.get("body", "").strip():
+            body_lines += ["", "### Description", "", pr["body"].strip()]
+
+        reviews = pr.get("reviews", {}).get("nodes", [])
+        if reviews:
+            body_lines += ["", "### Reviews"]
+            for rev in reviews:
+                author = (rev.get("author") or {}).get("login", "unknown")
+                body_lines.append(
+                    f"- **{author}** ({rev['state']}) on {rev['createdAt'][:10]}"
+                )
+                if rev.get("body", "").strip():
+                    body_lines.append(f"  > {rev['body'].strip()[:200]}")
+
+        filename = f"{repo_name}_pr{pr['number']}.md"
+        write_md(
+            base / "pull_requests" / filename,
+            frontmatter,
+            "\n".join(body_lines),
+        )
+
+    typer.echo(f"✓  Pull Requests: {len(prs)} files written")
+    return prs
+
+
+# ---------------------------------------------------------------------------
+# 4. READMEs
+# ---------------------------------------------------------------------------
+
+
+def extract_readmes(
+    client: GitHubClient, base: Path, login: str, repos: list[dict]
+) -> int:
+    typer.echo("→  Archiving READMEs…")
+    written = 0
+
+    for repo in repos:
+        repo_name = repo["name"]
+        data = client.rest(f"/repos/{login}/{repo_name}/readme")
+
+        if data is None:
+            time.sleep(client.rate_limit_delay)
+            continue
+
+        if isinstance(data, dict) and "content" in data:
+            content = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+        else:
+            content = ""
+
+        if not content.strip():
+            time.sleep(client.rate_limit_delay)
+            continue
+
+        frontmatter: dict[str, Any] = {
+            "repo": repo_name,
+            "url": repo.get("url", ""),
+            "archived_at": datetime.now(timezone.utc).isoformat(),
+            "category": "readme",
+        }
+        out_path = base / "readmes" / f"{repo_name}_readme.md"
+        write_md(out_path, frontmatter, content)
+        written += 1
+        time.sleep(client.rate_limit_delay)
+
+    typer.echo(f"✓  READMEs: {written} files archived")
+    return written
+
+
+# ---------------------------------------------------------------------------
+# 5. Stars
+# ---------------------------------------------------------------------------
+
+
+def extract_stars(
+    client: GitHubClient, base: Path, login: str, since: datetime,
+    per_page: int = 100,
+) -> list[dict]:
+    typer.echo("→  Extracting starred repositories…")
+
+    by_month: dict[str, list[dict]] = defaultdict(list)
+    all_stars: list[dict] = []
+    page = 1
+    star_headers = {"Accept": "application/vnd.github.star+json"}
+
+    while True:
+        data = client.rest(
+            f"/users/{login}/starred",
+            headers=star_headers,
+            per_page=per_page,
+            page=page,
+        )
+
+        if not isinstance(data, list) or not data:
+            break
+
+        reached_cutoff = False
+        for item in data:
+            starred_at_str = item.get("starred_at", "")
+            if not starred_at_str:
+                continue
+            starred_at = _iso_to_dt(starred_at_str)
+
+            if starred_at < since:
+                reached_cutoff = True
+                break
+
+            starred_repo = item.get("repo", {})
+            topics = starred_repo.get("topics", [])
+            entry = {
+                "starred_at": starred_at_str,
+                "name": starred_repo.get("full_name", ""),
+                "description": (starred_repo.get("description") or "").strip(),
+                "url": starred_repo.get("html_url", ""),
+                "language": starred_repo.get("language") or "",
+                "topics": topics,
+                "stars": starred_repo.get("stargazers_count", 0),
+            }
+            month = entry["starred_at"][:7]
+            by_month[month].append(entry)
+            all_stars.append(entry)
+
+        if reached_cutoff or len(data) < per_page:
+            break
+        page += 1
+        time.sleep(client.rate_limit_delay)
+
+    for month, entries in sorted(by_month.items()):
+        frontmatter: dict[str, Any] = {
+            "period": month,
+            "category": "stars",
+            "total": len(entries),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lines = [f"## Stars — {month}", ""]
+        for e in sorted(entries, key=lambda x: x["starred_at"], reverse=True):
+            topic_str = ", ".join(e["topics"]) if e["topics"] else ""
+            lines.append(f"### [{e['name']}]({e['url']})")
+            lines.append(f"- **Starred:** {e['starred_at'][:10]}")
+            lines.append(f"- **Language:** {e['language']}")
+            if e["description"]:
+                lines.append(f"- **Description:** {e['description']}")
+            if topic_str:
+                lines.append(f"- **Topics:** {topic_str}")
+            lines.append("")
+        write_md(base / "stars" / f"{month}.md", frontmatter, "\n".join(lines))
+
+    typer.echo(f"✓  Stars: {len(all_stars)} starred repos across {len(by_month)} months")
+    return all_stars
+
+
+# ---------------------------------------------------------------------------
+# 6. Projects
+# ---------------------------------------------------------------------------
+
+_PROJECT_QUERY = """
+query($login: String!, $after: String) {
+  user(login: $login) {
+    projectsV2(first: 50, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        shortDescription
+        url
+        createdAt
+        updatedAt
+        closed
+        public
+      }
+    }
+  }
+}
+"""
+
+
+def extract_projects(client: GitHubClient, base: Path, login: str) -> list[dict]:
+    typer.echo("→  Extracting GitHub Projects…")
+    cursor: Optional[str] = None
+    projects: list[dict] = []
+
+    while True:
+        variables: dict[str, Any] = {"login": login}
+        if cursor:
+            variables["after"] = cursor
+
+        data = client.graphql(_PROJECT_QUERY, variables)
+        if not data:
+            break
+
+        page_data = data["user"]["projectsV2"]
+        projects.extend(page_data["nodes"])
+
+        if not page_data["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page_data["pageInfo"]["endCursor"]
+        time.sleep(client.rate_limit_delay)
+
+    for proj in projects:
+        frontmatter: dict[str, Any] = {
+            "project_number": proj["number"],
+            "title": proj["title"],
+            "url": proj["url"],
+            "created_at": proj["createdAt"],
+            "updated_at": proj["updatedAt"],
+            "closed": proj["closed"],
+            "public": proj["public"],
+            "category": "project",
+        }
+        desc = proj.get("shortDescription") or ""
+        body = f"## {proj['title']}\n\n{desc}" if desc else f"## {proj['title']}"
+        safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in proj["title"])
+        write_md(
+            base / "projects" / f"project_{proj['number']}_{safe_title}.md",
+            frontmatter,
+            body,
+        )
+
+    typer.echo(f"✓  Projects: {len(projects)} files written")
+    return projects
+
+
+# ---------------------------------------------------------------------------
+# 7. Organizations
+# ---------------------------------------------------------------------------
+
+
+def extract_organizations(client: GitHubClient, base: Path, login: str) -> list[dict]:
+    typer.echo("→  Extracting organizations…")
+    data = client.rest("/user/orgs")
+    if not isinstance(data, list):
+        data = []
+
+    for org in data:
+        frontmatter: dict[str, Any] = {
+            "login": org.get("login", ""),
+            "description": (org.get("description") or "").strip(),
+            "url": org.get("url", ""),
+            "repos_url": org.get("repos_url", ""),
+            "category": "organization",
+        }
+        body = f"## {org.get('login', '')}\n\n{org.get('description', '') or ''}"
+        write_md(
+            base / "organizations" / f"{org.get('login', 'unknown')}.md",
+            frontmatter,
+            body,
+        )
+
+    typer.echo(f"✓  Organizations: {len(data)} files written")
+    return data
