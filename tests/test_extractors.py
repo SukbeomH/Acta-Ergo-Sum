@@ -15,6 +15,7 @@ from acta.extractors import (
     extract_pull_requests,
     extract_readmes,
     extract_repositories,
+    extract_reviews,
     extract_stars,
 )
 
@@ -518,6 +519,76 @@ class TestExtractIssues:
         content = (tmp_path / "issues" / "2025-03.md").read_text()
         assert "I agree" in content
         assert "commenter" in content
+
+
+# ---------------------------------------------------------------------------
+# extract_reviews
+# ---------------------------------------------------------------------------
+
+
+class TestExtractReviews:
+    def test_writes_review_files_grouped_by_month(self, tmp_path: Path):
+        """리뷰 활동을 월별 MD 파일로 그룹핑한다."""
+        review_nodes = [
+            {
+                "occurredAt": "2025-02-10T00:00:00Z",
+                "pullRequestReview": {
+                    "state": "APPROVED",
+                    "createdAt": "2025-02-10T00:00:00Z",
+                    "body": "LGTM",
+                    "pullRequest": {
+                        "title": "Add feature X",
+                        "number": 42,
+                        "url": "https://github.com/other/repo/pull/42",
+                        "repository": {"nameWithOwner": "other/repo"},
+                    },
+                },
+            },
+        ]
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"contributionsCollection": {
+                "pullRequestReviewContributions": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": review_nodes,
+                },
+            }}}
+        ])
+
+        reviews = extract_reviews(client, tmp_path, "user", SINCE)
+
+        assert len(reviews) == 1
+        assert (tmp_path / "reviews" / "2025-02.md").exists()
+        content = (tmp_path / "reviews" / "2025-02.md").read_text()
+        assert "Add feature X" in content
+        assert "APPROVED" in content
+
+    def test_stops_at_since_cutoff(self, tmp_path: Path):
+        """since 이전의 리뷰는 수집하지 않는다."""
+        old_review = {
+            "occurredAt": "2024-06-01T00:00:00Z",
+            "pullRequestReview": {
+                "state": "COMMENTED",
+                "createdAt": "2024-06-01T00:00:00Z",
+                "body": "old",
+                "pullRequest": {
+                    "title": "Old PR",
+                    "number": 1,
+                    "url": "https://github.com/other/repo/pull/1",
+                    "repository": {"nameWithOwner": "other/repo"},
+                },
+            },
+        }
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"contributionsCollection": {
+                "pullRequestReviewContributions": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [old_review],
+                },
+            }}}
+        ])
+
+        reviews = extract_reviews(client, tmp_path, "user", SINCE)
+        assert len(reviews) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -692,7 +692,108 @@ def extract_issues(
 
 
 # ---------------------------------------------------------------------------
-# 7. Projects
+# 7. Code Reviews (as reviewer)
+# ---------------------------------------------------------------------------
+
+_REVIEW_CONTRIBUTIONS_QUERY = """
+query($login: String!, $from: DateTime!, $to: DateTime!, $after: String) {
+  user(login: $login) {
+    contributionsCollection(from: $from, to: $to) {
+      pullRequestReviewContributions(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          occurredAt
+          pullRequestReview {
+            state
+            createdAt
+            body
+            pullRequest {
+              title
+              number
+              url
+              repository { nameWithOwner }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def extract_reviews(
+    client: GitHubClient, base: Path, login: str, since: datetime
+) -> list[dict]:
+    """다른 사람 PR에 남긴 코드 리뷰를 월별 MD 파일로 수집한다."""
+    typer.echo("→  Extracting code reviews…")
+    cursor: Optional[str] = None
+    reviews: list[dict] = []
+    now = datetime.now(timezone.utc)
+
+    while True:
+        variables: dict[str, Any] = {
+            "login": login,
+            "from": since.isoformat(),
+            "to": now.isoformat(),
+        }
+        if cursor:
+            variables["after"] = cursor
+
+        data = client.graphql(_REVIEW_CONTRIBUTIONS_QUERY, variables)
+        if not data:
+            break
+
+        contributions = data["user"]["contributionsCollection"]["pullRequestReviewContributions"]
+        nodes = contributions["nodes"]
+
+        for node in nodes:
+            occurred = _iso_to_dt(node["occurredAt"])
+            if occurred < since:
+                continue
+            review = node["pullRequestReview"]
+            pr = review["pullRequest"]
+            reviews.append({
+                "date": node["occurredAt"],
+                "state": review["state"],
+                "body": review.get("body", ""),
+                "pr_title": pr["title"],
+                "pr_number": pr["number"],
+                "pr_url": pr["url"],
+                "repository": pr["repository"]["nameWithOwner"],
+            })
+
+        if not contributions["pageInfo"]["hasNextPage"]:
+            break
+        cursor = contributions["pageInfo"]["endCursor"]
+        time.sleep(client.rate_limit_delay)
+
+    # 월별 그룹핑
+    by_month: dict[str, list[dict]] = defaultdict(list)
+    for r in reviews:
+        month = r["date"][:7]
+        by_month[month].append(r)
+
+    for month, entries in sorted(by_month.items()):
+        frontmatter: dict[str, Any] = {
+            "period": month,
+            "category": "reviews",
+            "total": len(entries),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lines = [f"## Code Reviews — {month}", ""]
+        for e in sorted(entries, key=lambda x: x["date"]):
+            lines.append(f"- `{e['date'][:10]}` **{e['repository']}** PR #{e['pr_number']}: {e['pr_title']} [{e['state']}]")
+            if e.get("body", "").strip():
+                lines.append(f"  > {e['body'].strip()[:200]}")
+        write_md(base / "reviews" / f"{month}.md", frontmatter, "\n".join(lines))
+
+    typer.echo(f"✓  Code Reviews: {len(reviews)} reviews across {len(by_month)} months")
+    return reviews
+
+
+# ---------------------------------------------------------------------------
+# 8. Projects
 # ---------------------------------------------------------------------------
 
 _PROJECT_QUERY = """

@@ -18,6 +18,7 @@ from acta.extractors import (
     extract_pull_requests,
     extract_readmes,
     extract_repositories,
+    extract_reviews,
     extract_stars,
 )
 from acta.writers import generate_metadata, generate_timeline
@@ -33,6 +34,7 @@ SUBDIRS = [
     "commits",
     "pull_requests",
     "issues",
+    "reviews",
     "readmes",
     "stars",
     "projects",
@@ -57,6 +59,7 @@ def run(
     skip_stars: bool = typer.Option(False, "--skip-stars", help="Skip star extraction."),
     skip_contributed: bool = typer.Option(False, "--skip-contributed", help="Skip contributed repos extraction."),
     skip_issues: bool = typer.Option(False, "--skip-issues", help="Skip issue extraction."),
+    skip_reviews: bool = typer.Option(False, "--skip-reviews", help="Skip code review extraction."),
 ) -> None:
     """Collect GitHub activity and write to a markdown knowledge base."""
     base = Path(output)
@@ -104,6 +107,11 @@ def run(
         issues = extract_issues(client, base, login, since)
         typer.echo("")
 
+    reviews: list[dict] = []
+    if not skip_reviews:
+        reviews = extract_reviews(client, base, login, since)
+        typer.echo("")
+
     if not skip_readmes:
         extract_readmes(client, base, login, repos)
         typer.echo("")
@@ -119,8 +127,8 @@ def run(
     orgs = extract_organizations(client, base, login)
     typer.echo("")
 
-    generate_metadata(base, login, days, repos, commits, prs, stars, projects, orgs, SUBDIRS, issues=issues)
-    generate_timeline(base, commits, prs, stars, issues=issues)
+    generate_metadata(base, login, days, repos, commits, prs, stars, projects, orgs, SUBDIRS, issues=issues, reviews=reviews)
+    generate_timeline(base, commits, prs, stars, issues=issues, reviews=reviews)
 
     typer.echo("\n✅  Done! Knowledge base is ready.")
 
