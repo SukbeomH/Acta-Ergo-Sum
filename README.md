@@ -4,14 +4,19 @@
 
 > *I act, therefore I am.*
 
-A CLI tool that collects your GitHub activity and structures it into an
-LLM-friendly **Markdown knowledge base** — complete with YAML Frontmatter,
-a `metadata.json` index, a `timeline.csv` for time-series analysis, and a
-`SUMMARY.md` activity report.
+GitHub 활동 데이터를 LLM 친화적 **Markdown 지식 베이스**로 수집하고,
+특정 레포지토리를 딥 분석하여 프로젝트의 구조/기술 스택/설계 의도를 추출하는 CLI 도구.
+
+**두 가지 모드:**
+- `acta run` — 내 GitHub 활동 전체를 수집 (이력서/포트폴리오용)
+- `acta deep` — 특정 레포를 분석하여 LLM이 프로젝트를 이해할 수 있는 컨텍스트 생성
+- `acta mcp` — MCP 서버로 LLM 에이전트에게 도구를 직접 노출
 
 ---
 
 ## What It Collects
+
+### `acta run` — 사용자 활동 수집
 
 ```mermaid
 graph LR
@@ -20,6 +25,9 @@ graph LR
     end
 
     subgraph Extractors
+        PRF[Profile]
+        PIN[Pinned Repos]
+        CAL[Contributions]
         R[Repositories]
         CR[Contributed Repos]
         C[Commits]
@@ -39,23 +47,50 @@ graph LR
         SUM[SUMMARY.md]
     end
 
-    GH --> R & CR & C & PR & I & RV & S & RM & P & O
-    R & CR & C & PR & I & RV & S & RM & P & O --> MD
+    GH --> PRF & PIN & CAL & R & CR & C & PR & I & RV & S & RM & P & O
+    PRF & PIN & CAL & R & CR & C & PR & I & RV & S & RM & P & O --> MD
     MD --> JSON & CSV & SUM
 ```
 
-| Data Source | API | Output | Grouping |
-|---|---|---|---|
-| Owned Repositories | GraphQL | `repositories/*.md` | Per repo |
-| Contributed Repos | GraphQL | `repositories/*.md` | Per repo (deduped) |
-| Commits | GraphQL | `commits/YYYY-MM.md` | Monthly |
-| Pull Requests | GraphQL | `pull_requests/*.md` | Per PR |
-| Issues | GraphQL | `issues/YYYY-MM.md` | Monthly |
-| Code Reviews | GraphQL | `reviews/YYYY-MM.md` | Monthly |
-| Stars | REST | `stars/YYYY-MM.md` | Monthly |
-| READMEs | REST | `readmes/*_readme.md` | Per repo |
-| Projects (v2) | GraphQL | `projects/*.md` | Per project |
-| Organizations | REST | `organizations/*.md` | Per org |
+| Data Source | API | Output |
+|---|---|---|
+| User Profile | GraphQL | `profile.md` |
+| Pinned Repos | GraphQL | `pinned.md` |
+| Contribution Calendar | GraphQL | `contributions.md` |
+| Owned Repositories | GraphQL | `repositories/*.md` |
+| Contributed Repos | GraphQL | `repositories/*.md` |
+| Commits | GraphQL | `commits/YYYY-MM.md` |
+| Pull Requests | GraphQL | `pull_requests/*.md` |
+| Issues | GraphQL | `issues/YYYY-MM.md` |
+| Code Reviews | GraphQL | `reviews/YYYY-MM.md` |
+| Stars | GraphQL | `stars/YYYY-MM.md` |
+| READMEs | REST | `readmes/*_readme.md` |
+| Projects (v2) | GraphQL | `projects/*.md` |
+| Organizations | REST | `organizations/*.md` |
+
+### `acta deep` — 레포지토리 딥 분석
+
+특정 레포를 분석하여 LLM이 "이 프로젝트가 뭐고, 어떻게 설계됐고, 왜 만들었는지"를 이해할 수 있는 컨텍스트를 생성.
+
+```mermaid
+graph LR
+    REPO[owner/repo] --> COLL[Collector]
+    COLL --> OV[overview.md<br/>메타+README+라이선스]
+    COLL --> ST[structure.md<br/>트리+파일분포+진입점]
+    COLL --> TS[tech_stack.md<br/>언어+의존성+설정파일]
+    COLL --> EV[evolution.md<br/>릴리스+커밋+CHANGELOG]
+    COLL --> CM[community.md<br/>건강도+라벨+거버넌스]
+    COLL --> MY[my_contribution.md<br/>내 기여 요약]
+```
+
+| Section | 데이터 소스 | 목적 |
+|---|---|---|
+| `overview.md` | GraphQL + README | 프로젝트 정체성 |
+| `structure.md` | Git Tree + Languages API | 아키텍처 파악 |
+| `tech_stack.md` | Dependency Graph + 핵심 파일 | 기술 스택 이해 |
+| `evolution.md` | Releases + Commits + CHANGELOG | 진화 내러티브 |
+| `community.md` | Community Profile + Labels | 운영/거버넌스 |
+| `my_contribution.md` | Stats API | 개인 기여 정량화 |
 
 ---
 
@@ -70,74 +105,110 @@ graph LR
 ## Installation
 
 ```bash
-uv sync
+uv sync                    # 기본 의존성
+uv sync --extra mcp        # MCP 서버 포함
 ```
 
 ## Usage
 
+### 활동 수집 (`run`)
+
 ```bash
-# Collect the last 365 days of activity (default)
+# 최근 365일 활동 수집 (기본)
 uv run python app.py run
 
-# Custom period and output directory
+# 기간 / 출력 경로 지정
 uv run python app.py run --days 90 --output ./my_data
 
-# Fast run — skip slow/optional steps
+# 빠른 실행 — 느린 단계 건너뛰기
 uv run python app.py run --days 30 --skip-readmes --skip-stars
 
-# Show authenticated user
+# 인증 확인
 uv run python app.py whoami
 ```
+
+### 레포 딥 분석 (`deep`)
+
+```bash
+# 특정 레포 분석 → deep_analysis/{repo}/ 에 파일 생성
+uv run python app.py deep owner/repo
+
+# stdout 모드 — LLM 에이전트에 파이프
+uv run python app.py deep owner/repo --stdout
+
+# 내 기여 분석 포함
+uv run python app.py deep owner/repo --include-me
+```
+
+### MCP 서버 (`mcp`)
+
+```bash
+# MCP 서버 시작 — Claude Code, Cursor 등에서 tool로 연결
+uv run python app.py mcp
+```
+
+MCP로 노출되는 도구:
+
+| Tool | 용도 |
+|---|---|
+| `deep_analyze_repo` | 전체 딥 분석 (섹션 선택 가능) |
+| `get_repo_structure` | 디렉토리 트리 + 파일 분포 |
+| `get_repo_key_files` | 핵심 설정 파일 내용 (manifest, CI, docs 등) |
+| `get_repo_evolution` | 릴리스 + 커밋 + CHANGELOG |
 
 ### Options
 
 | Flag | Default | Description |
 |---|---|---|
-| `--days`, `-d` | `365` | How many past days of activity to collect |
-| `--output`, `-o` | `./acta_data` | Output base directory |
-| `--skip-readmes` | `false` | Skip README archival (faster) |
-| `--skip-commits` | `false` | Skip commit extraction |
-| `--skip-prs` | `false` | Skip pull request extraction |
-| `--skip-issues` | `false` | Skip issue extraction |
-| `--skip-reviews` | `false` | Skip code review extraction |
-| `--skip-stars` | `false` | Skip star extraction |
-| `--skip-contributed` | `false` | Skip contributed repos extraction |
+| `--days`, `-d` | `365` | 수집 기간 (일) |
+| `--months`, `-m` | `0` | 수집 기간 (월, --days 우선) |
+| `--years`, `-y` | `0` | 수집 기간 (년) |
+| `--output`, `-o` | `./acta_data` | 출력 디렉토리 |
+| `--skip-readmes` | `false` | README 수집 건너뛰기 |
+| `--skip-commits` | `false` | 커밋 수집 건너뛰기 |
+| `--skip-prs` | `false` | PR 수집 건너뛰기 |
+| `--skip-issues` | `false` | 이슈 수집 건너뛰기 |
+| `--skip-reviews` | `false` | 리뷰 수집 건너뛰기 |
+| `--skip-stars` | `false` | 스타 수집 건너뛰기 |
+| `--skip-contributed` | `false` | 기여 레포 수집 건너뛰기 |
+| `--since-last-run` | `false` | 마지막 실행 이후만 수집 |
 
 ---
 
 ## Output Structure
 
+### `acta run` 출력
+
 ```text
 acta_data/
-├── repositories/          # One .md per repo (owned + contributed)
-├── commits/               # YYYY-MM.md — commits grouped by month
-├── pull_requests/         # One .md per PR (reviews, state, description)
-├── issues/                # YYYY-MM.md — issues grouped by month
-├── reviews/               # YYYY-MM.md — code reviews given by you
-├── readmes/               # Archived README.md files
-├── stars/                 # YYYY-MM.md — starred repos grouped by month
-├── projects/              # GitHub Projects (v2) info
-├── organizations/         # Orgs you belong to
-├── metadata.json          # LLM-friendly index of everything
-├── timeline.csv           # Chronological log: date, category, repo, action
-└── SUMMARY.md             # Human/LLM-readable activity report
+├── profile.md             # 사용자 프로필 (bio, location, social)
+├── pinned.md              # 핀된 레포 (포트폴리오 하이라이트)
+├── contributions.md       # 잔디 데이터 (streak, 월별/요일별 집계)
+├── repositories/          # 레포별 .md (owned + contributed)
+├── commits/               # YYYY-MM.md — 월별 커밋
+├── pull_requests/         # PR별 .md (리뷰, 상태, 설명)
+├── issues/                # YYYY-MM.md — 월별 이슈
+├── reviews/               # YYYY-MM.md — 코드 리뷰
+├── readmes/               # README 아카이브
+├── stars/                 # YYYY-MM.md — 스타 레포
+├── projects/              # GitHub Projects v2
+├── organizations/         # 소속 조직
+├── metadata.json          # LLM용 인덱스
+├── timeline.csv           # 시계열 로그
+└── SUMMARY.md             # 활동 리포트
 ```
 
-Each Markdown file starts with **YAML Frontmatter** for easy parsing:
+### `acta deep` 출력
 
-```markdown
----
-name: my-repo
-created_at: 2023-01-15T10:00:00Z
-language: Python
-topics:
-  - cli
-  - data-engineering
-is_fork: false
----
-
-## my-repo
-...
+```text
+deep_analysis/{repo}/
+├── overview.md            # 메타 + README + 라이선스
+├── structure.md           # 트리 + 파일 분포 + 진입점
+├── tech_stack.md          # 언어 + 의존성 + 설정 파일 내용
+├── evolution.md           # 릴리스 노트 + CHANGELOG + 커밋 요약
+├── community.md           # 건강도 + 라벨 분포 + 거버넌스
+├── my_contribution.md     # (--include-me) 내 기여 통계
+└── metadata.json          # 분석 메타데이터
 ```
 
 ---
@@ -146,45 +217,57 @@ is_fork: false
 
 ```mermaid
 graph TD
-    APP[app.py<br/>Entry point] --> CLI[acta/cli.py<br/>Typer CLI]
-    CLI --> CLIENT[acta/client.py<br/>GitHubClient]
-    CLI --> EXT[acta/extractors.py<br/>10 extract_* functions]
-    CLI --> WRT[acta/writers.py<br/>Output generators]
+    APP[app.py] --> CLI[acta/cli.py<br/>Typer CLI]
+
+    CLI --> RUN[run command]
+    CLI --> DEEP[deep command]
+    CLI --> MCP_CMD[mcp command]
+
+    RUN --> CLIENT[acta/client.py<br/>GitHubClient]
+    RUN --> EXT[acta/extractors.py<br/>13 extract_* functions]
+    RUN --> WRT[acta/writers.py]
+
+    DEEP --> DC[acta/deep/collector.py]
+    DEEP --> DET[acta/deep/detector.py]
+    DEEP --> REN[acta/deep/renderer.py]
+    DC --> CLIENT
+
+    MCP_CMD --> MCP[acta/mcp_server.py<br/>FastMCP Server]
+    MCP --> DC
 
     CLIENT -->|subprocess| GH[gh CLI]
-    EXT -->|DI| CLIENT
-    EXT --> WRT
-
-    subgraph Output Formats
-        WRT --> MD[write_md<br/>YAML + Markdown]
-        WRT --> META[generate_metadata<br/>JSON]
-        WRT --> TL[generate_timeline<br/>CSV]
-        WRT --> SUM[generate_summary<br/>Markdown report]
-    end
 
     style CLIENT fill:#e1f5fe
     style EXT fill:#f3e5f5
     style WRT fill:#e8f5e9
+    style DC fill:#fff3e0
+    style MCP fill:#fce4ec
 ```
 
 ### Module Breakdown
 
-| Module | Lines | Responsibility |
-|---|---|---|
-| `acta/client.py` | 90 | `GitHubClient` — REST/GraphQL via `gh` CLI subprocess |
-| `acta/extractors.py` | 893 | 10 `extract_*` functions with DI + pagination |
-| `acta/writers.py` | 251 | MD/JSON/CSV/Summary output (pure functions) |
-| `acta/cli.py` | 143 | Typer CLI orchestration (`run`, `whoami`) |
+| Module | Responsibility |
+|---|---|
+| `acta/client.py` | `GitHubClient` — REST/GraphQL via `gh` CLI |
+| `acta/extractors.py` | 13 `extract_*` functions (profile, pinned, calendar, repos, commits, PRs, issues, reviews, stars, readmes, projects, orgs, contributed) |
+| `acta/writers.py` | MD/JSON/CSV/Summary 출력 |
+| `acta/cli.py` | Typer CLI (`run`, `deep`, `mcp`, `analyze`, `whoami`) |
+| `acta/deep/collector.py` | 레포 딥 분석 데이터 수집 |
+| `acta/deep/detector.py` | 핵심 파일/진입점 자동 감지 |
+| `acta/deep/renderer.py` | 딥 분석 마크다운 렌더링 |
+| `acta/mcp_server.py` | FastMCP 서버 (4 tools) |
 
 ### Design Decisions
 
 | Decision | Rationale |
 |---|---|
-| Wrap `gh` CLI (not HTTP) | Delegates auth/token management to `gh` |
-| Dependency Injection | `GitHubClient` injected into extractors for testability |
-| `FakeGitHubClient` in tests | No subprocess calls — fast, deterministic tests |
-| YAML frontmatter | LLM-parseable structured metadata in every file |
-| Monthly grouping | Commits, issues, reviews, stars grouped by `YYYY-MM` |
+| `gh` CLI 래핑 | 인증/토큰 관리를 `gh`에 위임 |
+| Dependency Injection | `GitHubClient` 주입으로 테스트 격리 |
+| `FakeGitHubClient` | subprocess 없는 빠른 테스트 |
+| YAML Frontmatter | LLM 파싱 가능한 구조화 메타데이터 |
+| `--stdout` 모드 | LLM 에이전트에 직접 파이프 가능 |
+| MCP 서버 | Claude Code/Cursor 등에서 tool로 직접 호출 |
+| 핵심 파일 자동 감지 | 매니페스트/CI/Dockerfile 등 패턴 매칭 |
 
 ---
 
@@ -197,10 +280,12 @@ uv run pytest tests/ -v
 | Test Module | Tests | Coverage |
 |---|---|---|
 | `test_client.py` | 9 | GitHubClient REST/GraphQL/auth |
-| `test_extractors.py` | 20 | All 10 extractors via FakeClient |
+| `test_extractors.py` | 30 | 13 extractors via FakeClient |
 | `test_writers.py` | 10 | MD/JSON/CSV/Summary output |
-| `test_cli.py` | 4 | CLI end-to-end with CliRunner |
-| **Total** | **44** | |
+| `test_cli.py` | 6 | CLI end-to-end with CliRunner |
+| `test_deep.py` | 22 | Detector + Renderer |
+| `test_analyzer.py` | 6 | Template loading + prompt building |
+| **Total** | **83** | |
 
 ---
 
