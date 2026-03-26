@@ -13,8 +13,11 @@ from acta.client import GitHubClient
 from acta.extractors import (
     extract_commits,
     extract_contributed_repos,
+    extract_contribution_calendar,
     extract_issues,
     extract_organizations,
+    extract_pinned_repos,
+    extract_profile,
     extract_projects,
     extract_pull_requests,
     extract_readmes,
@@ -113,6 +116,15 @@ def run(
     _create_directories(base)
     typer.echo("")
 
+    profile = extract_profile(client, base, login)
+    typer.echo("")
+
+    pinned = extract_pinned_repos(client, base, login)
+    typer.echo("")
+
+    calendar = extract_contribution_calendar(client, base, login, since)
+    typer.echo("")
+
     repos = extract_repositories(client, base, login, since)
     typer.echo("")
 
@@ -158,9 +170,9 @@ def run(
     orgs = extract_organizations(client, base, login)
     typer.echo("")
 
-    generate_metadata(base, login, days, repos, commits, prs, stars, projects, orgs, SUBDIRS, issues=issues, reviews=reviews)
+    generate_metadata(base, login, days, repos, commits, prs, stars, projects, orgs, SUBDIRS, issues=issues, reviews=reviews, pinned=pinned, calendar=calendar)
     generate_timeline(base, commits, prs, stars, issues=issues, reviews=reviews)
-    generate_summary(base, login, days, repos, commits, prs, issues, reviews, stars, projects, orgs)
+    generate_summary(base, login, days, repos, commits, prs, issues, reviews, stars, projects, orgs, pinned=pinned, calendar=calendar)
     typer.echo("✓  SUMMARY.md written")
 
     typer.echo("\n✅  Done! Knowledge base is ready.")
@@ -220,6 +232,115 @@ def analyze(
             raise typer.Exit(code=1)
     else:
         typer.echo(f"\n💡  To generate with Claude API, add --call-api")
+
+
+@app.command()
+def deep(
+    repo: str = typer.Argument(..., help="Repository to analyze (owner/repo)."),
+    output: str = typer.Option("./deep_analysis", "--output", "-o", help="Output directory."),
+    stdout: bool = typer.Option(False, "--stdout", help="Print all sections to stdout instead of files."),
+    include_me: bool = typer.Option(False, "--include-me", help="Include my contribution analysis."),
+) -> None:
+    """Deep-analyze a GitHub repository for LLM context."""
+    from acta.deep.collector import DeepCollector
+    from acta.deep.detector import detect_key_files
+    from acta.deep.renderer import render_all_sections
+
+    parts = repo.strip().split("/")
+    if len(parts) != 2:
+        typer.echo("✗  Format: owner/repo", err=True)
+        raise typer.Exit(code=1)
+    owner, name = parts
+
+    typer.echo(f"🔍  Deep analyzing {repo}…")
+
+    client = GitHubClient()
+    collector = DeepCollector(client, owner, name)
+
+    # 데이터 수집
+    typer.echo("\n📦  Collecting data…")
+    overview = collector.fetch_overview()
+    if not overview:
+        typer.echo("✗  Could not fetch repository data.", err=True)
+        raise typer.Exit(code=1)
+
+    readme = collector.fetch_readme()
+    tree_paths = collector.fetch_tree()
+    languages = collector.fetch_languages()
+
+    # 핵심 파일 내용 수집
+    typer.echo("  → key files…")
+    key_files = detect_key_files(tree_paths)
+    key_file_contents: dict[str, str] = {}
+    for _cat, paths in key_files.items():
+        for path in paths[:3]:
+            content = collector.fetch_file_content(path)
+            if content:
+                key_file_contents[path] = content
+
+    deps = collector.fetch_dependencies()
+    releases = collector.fetch_releases()
+
+    # CHANGELOG
+    changelog = ""
+    for fname in ["CHANGELOG.md", "CHANGES.md", "HISTORY.md"]:
+        if fname in tree_paths:
+            changelog = collector.fetch_file_content(fname)
+            break
+
+    commits = collector.fetch_recent_commits()
+    health = collector.fetch_community_health()
+    labels = collector.fetch_issue_labels()
+
+    # 내 기여 (선택)
+    my_stats = None
+    login = ""
+    if include_me:
+        login = client.get_authenticated_user()
+        my_stats = collector.fetch_my_contributions(login)
+
+    # 렌더링
+    typer.echo("\n📝  Rendering…")
+    base = Path(output) / name
+    base.mkdir(parents=True, exist_ok=True)
+
+    sections = render_all_sections(
+        base=base,
+        overview=overview,
+        readme=readme,
+        tree_paths=tree_paths,
+        languages=languages,
+        key_file_contents=key_file_contents,
+        dependencies=deps,
+        releases=releases,
+        changelog=changelog,
+        recent_commits=commits,
+        health=health,
+        labels=labels,
+        my_stats=my_stats,
+        login=login,
+    )
+
+    if stdout:
+        for section_name, body in sections.items():
+            typer.echo(f"\n{'=' * 60}")
+            typer.echo(body)
+    else:
+        typer.echo(f"\n✅  Deep analysis written to: {base.resolve()}")
+        for section_name in sections:
+            typer.echo(f"   - {section_name}.md")
+
+
+@app.command()
+def mcp() -> None:
+    """Start the MCP server for LLM agent integration."""
+    try:
+        from acta.mcp_server import run_server
+    except ImportError:
+        typer.echo("✗  MCP dependencies not installed. Run: uv add 'mcp[cli]'", err=True)
+        raise typer.Exit(code=1)
+    typer.echo("🚀  Starting Acta MCP server…")
+    run_server()
 
 
 @app.command()

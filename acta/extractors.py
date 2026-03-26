@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -961,3 +961,363 @@ def extract_organizations(client: GitHubClient, base: Path, login: str) -> list[
 
     typer.echo(f"✓  Organizations: {len(data)} files written")
     return data
+
+
+# ---------------------------------------------------------------------------
+# 9. User Profile
+# ---------------------------------------------------------------------------
+
+_PROFILE_QUERY = """
+query($login: String!) {
+  user(login: $login) {
+    login
+    name
+    bio
+    company
+    location
+    email
+    websiteUrl
+    twitterUsername
+    avatarUrl
+    isHireable
+    createdAt
+    updatedAt
+    followers { totalCount }
+    following { totalCount }
+    repositories(ownerAffiliations: [OWNER]) { totalCount }
+    gists { totalCount }
+    socialAccounts(first: 10) {
+      nodes { provider displayName url }
+    }
+    status {
+      message
+      emoji
+    }
+  }
+}
+"""
+
+
+def extract_profile(
+    client: GitHubClient, base: Path, login: str
+) -> dict[str, Any]:
+    """사용자 프로필 정보를 수집하여 profile.md에 저장한다."""
+    typer.echo("→  Extracting user profile…")
+
+    data = client.graphql(_PROFILE_QUERY, {"login": login})
+    if not data or "user" not in data:
+        typer.echo("✗  Could not fetch profile")
+        return {}
+
+    user = data["user"]
+    social = [
+        {"provider": s["provider"], "name": s["displayName"], "url": s["url"]}
+        for s in (user.get("socialAccounts") or {}).get("nodes", [])
+    ]
+    status = user.get("status") or {}
+
+    frontmatter: dict[str, Any] = {
+        "login": user["login"],
+        "name": user.get("name") or "",
+        "bio": (user.get("bio") or "").strip(),
+        "company": user.get("company") or "",
+        "location": user.get("location") or "",
+        "email": user.get("email") or "",
+        "website": user.get("websiteUrl") or "",
+        "twitter": user.get("twitterUsername") or "",
+        "avatar_url": user.get("avatarUrl") or "",
+        "hireable": user.get("isHireable", False),
+        "created_at": user.get("createdAt", ""),
+        "followers": user.get("followers", {}).get("totalCount", 0),
+        "following": user.get("following", {}).get("totalCount", 0),
+        "public_repos": user.get("repositories", {}).get("totalCount", 0),
+        "gists": user.get("gists", {}).get("totalCount", 0),
+        "category": "profile",
+    }
+
+    body_lines = [f"## {user.get('name') or login}", ""]
+    if user.get("bio"):
+        body_lines.append(f"> {user['bio'].strip()}")
+        body_lines.append("")
+    body_lines.append(f"- **Location**: {user.get('location') or 'N/A'}")
+    body_lines.append(f"- **Company**: {user.get('company') or 'N/A'}")
+    if user.get("websiteUrl"):
+        body_lines.append(f"- **Website**: {user['websiteUrl']}")
+    body_lines.append(f"- **GitHub since**: {user.get('createdAt', '')[:10]}")
+    body_lines.append(f"- **Followers**: {frontmatter['followers']} | **Following**: {frontmatter['following']}")
+    body_lines.append(f"- **Public repos**: {frontmatter['public_repos']} | **Gists**: {frontmatter['gists']}")
+    if user.get("isHireable"):
+        body_lines.append(f"- **Hireable**: Yes")
+    if status.get("message"):
+        body_lines.append(f"- **Status**: {status.get('emoji', '')} {status['message']}")
+    if social:
+        body_lines.append("")
+        body_lines.append("### Social Accounts")
+        for s in social:
+            body_lines.append(f"- **{s['provider']}**: [{s['name']}]({s['url']})")
+
+    write_md(base / "profile.md", frontmatter, "\n".join(body_lines))
+    typer.echo(f"✓  Profile: {login}")
+    return user
+
+
+# ---------------------------------------------------------------------------
+# 10. Pinned Repositories
+# ---------------------------------------------------------------------------
+
+_PINNED_QUERY = """
+query($login: String!) {
+  user(login: $login) {
+    pinnedItems(first: 6, types: [REPOSITORY]) {
+      nodes {
+        ... on Repository {
+          name
+          description
+          url
+          primaryLanguage { name }
+          stargazerCount
+          forkCount
+          repositoryTopics(first: 10) { nodes { topic { name } } }
+          isPrivate
+          homepageUrl
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def extract_pinned_repos(
+    client: GitHubClient, base: Path, login: str
+) -> list[dict]:
+    """사용자가 핀한 레포지토리(최대 6개)를 수집한다."""
+    typer.echo("→  Extracting pinned repositories…")
+
+    data = client.graphql(_PINNED_QUERY, {"login": login})
+    if not data or "user" not in data:
+        typer.echo("✗  Could not fetch pinned repos")
+        return []
+
+    nodes = data["user"]["pinnedItems"]["nodes"]
+    if not nodes:
+        typer.echo("✓  Pinned Repos: 0 (none pinned)")
+        return []
+
+    pinned_list = []
+    body_lines = ["## Pinned Repositories", ""]
+
+    for i, repo in enumerate(nodes, 1):
+        lang = (repo.get("primaryLanguage") or {}).get("name", "")
+        topics = [t["topic"]["name"] for t in repo.get("repositoryTopics", {}).get("nodes", [])]
+        languages = _fetch_language_breakdown(client, login, repo["name"])
+
+        pinned_list.append({
+            "name": repo["name"],
+            "description": repo.get("description") or "",
+            "url": repo.get("url", ""),
+            "language": lang,
+            "languages": languages,
+            "stars": repo.get("stargazerCount", 0),
+            "forks": repo.get("forkCount", 0),
+            "topics": topics,
+            "homepage": repo.get("homepageUrl") or "",
+        })
+
+        body_lines.append(f"### {i}. [{repo['name']}]({repo.get('url', '')})")
+        if repo.get("description"):
+            body_lines.append(f"> {repo['description']}")
+        body_lines.append("")
+        body_lines.append(f"- **Language**: {lang or 'N/A'}")
+        if languages:
+            body_lines.append(f"- **Breakdown**: {', '.join(languages[:5])}")
+        body_lines.append(f"- **Stars**: {repo.get('stargazerCount', 0)} | **Forks**: {repo.get('forkCount', 0)}")
+        if topics:
+            body_lines.append(f"- **Topics**: {', '.join(topics)}")
+        if repo.get("homepageUrl"):
+            body_lines.append(f"- **Homepage**: {repo['homepageUrl']}")
+        body_lines.append("")
+        time.sleep(client.rate_limit_delay)
+
+    frontmatter: dict[str, Any] = {
+        "category": "pinned",
+        "total": len(pinned_list),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_md(base / "pinned.md", frontmatter, "\n".join(body_lines))
+    typer.echo(f"✓  Pinned Repos: {len(pinned_list)} repos")
+    return pinned_list
+
+
+# ---------------------------------------------------------------------------
+# 11. Contribution Calendar
+# ---------------------------------------------------------------------------
+
+_CALENDAR_QUERY = """
+query($login: String!, $from: DateTime!, $to: DateTime!) {
+  user(login: $login) {
+    contributionsCollection(from: $from, to: $to) {
+      contributionCalendar {
+        totalContributions
+        weeks {
+          contributionDays {
+            date
+            contributionCount
+            weekday
+          }
+        }
+      }
+      totalCommitContributions
+      totalPullRequestContributions
+      totalPullRequestReviewContributions
+      totalIssueContributions
+      totalRepositoryContributions
+      restrictedContributionsCount
+    }
+  }
+}
+"""
+
+
+def extract_contribution_calendar(
+    client: GitHubClient, base: Path, login: str, since: datetime
+) -> dict[str, Any]:
+    """Contribution calendar(잔디) 데이터를 수집한다. GitHub API는 최대 1년 범위만 허용."""
+    typer.echo("→  Extracting contribution calendar…")
+
+    now = datetime.now(timezone.utc)
+    # GitHub API는 contributionsCollection에 최대 1년 범위만 허용
+    earliest = max(since, now - timedelta(days=365))
+
+    data = client.graphql(_CALENDAR_QUERY, {
+        "login": login,
+        "from": earliest.isoformat(),
+        "to": now.isoformat(),
+    })
+    if not data or "user" not in data:
+        typer.echo("✗  Could not fetch contribution calendar")
+        return {}
+
+    collection = data["user"]["contributionsCollection"]
+    calendar = collection["contributionCalendar"]
+
+    # 일별 데이터 평탄화
+    days: list[dict[str, Any]] = []
+    for week in calendar["weeks"]:
+        for day in week["contributionDays"]:
+            if day["contributionCount"] > 0:
+                days.append(day)
+
+    # 통계 계산
+    total = calendar["totalContributions"]
+    counts = [d["contributionCount"] for d in days]
+    max_streak = _calc_streak(calendar["weeks"])
+    current_streak = _calc_current_streak(calendar["weeks"])
+
+    stats = {
+        "total_contributions": total,
+        "active_days": len(days),
+        "max_daily": max(counts) if counts else 0,
+        "avg_daily": round(total / 365, 1),
+        "max_streak": max_streak,
+        "current_streak": current_streak,
+        "commits": collection.get("totalCommitContributions", 0),
+        "pull_requests": collection.get("totalPullRequestContributions", 0),
+        "reviews": collection.get("totalPullRequestReviewContributions", 0),
+        "issues": collection.get("totalIssueContributions", 0),
+        "repos_created": collection.get("totalRepositoryContributions", 0),
+        "private_contributions": collection.get("restrictedContributionsCount", 0),
+    }
+
+    # 월별 집계
+    monthly: dict[str, int] = defaultdict(int)
+    for week in calendar["weeks"]:
+        for day in week["contributionDays"]:
+            month = day["date"][:7]
+            monthly[month] += day["contributionCount"]
+
+    # 요일별 집계
+    weekday_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    by_weekday: dict[int, int] = defaultdict(int)
+    for week in calendar["weeks"]:
+        for day in week["contributionDays"]:
+            by_weekday[day["weekday"]] += day["contributionCount"]
+
+    frontmatter: dict[str, Any] = {
+        "category": "contribution_calendar",
+        "total_contributions": total,
+        "active_days": len(days),
+        "max_streak": max_streak,
+        "current_streak": current_streak,
+        "period_from": earliest.strftime("%Y-%m-%d"),
+        "period_to": now.strftime("%Y-%m-%d"),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    body_lines = ["## Contribution Calendar", ""]
+    body_lines.append("### Summary")
+    body_lines.append("")
+    body_lines.append(f"- **Total contributions**: {total}")
+    body_lines.append(f"- **Active days**: {len(days)} / 365")
+    body_lines.append(f"- **Max streak**: {max_streak} days")
+    body_lines.append(f"- **Current streak**: {current_streak} days")
+    body_lines.append(f"- **Max daily**: {stats['max_daily']}")
+    body_lines.append(f"- **Avg daily**: {stats['avg_daily']}")
+    body_lines.append("")
+    body_lines.append("### Breakdown")
+    body_lines.append("")
+    body_lines.append(f"- Commits: {stats['commits']}")
+    body_lines.append(f"- Pull Requests: {stats['pull_requests']}")
+    body_lines.append(f"- Reviews: {stats['reviews']}")
+    body_lines.append(f"- Issues: {stats['issues']}")
+    body_lines.append(f"- Repositories created: {stats['repos_created']}")
+    if stats['private_contributions'] > 0:
+        body_lines.append(f"- Private contributions: {stats['private_contributions']}")
+    body_lines.append("")
+
+    body_lines.append("### Monthly")
+    body_lines.append("")
+    body_lines.append("| Month | Contributions |")
+    body_lines.append("|---|---|")
+    for month in sorted(monthly.keys()):
+        bar = "█" * min(monthly[month] // 5, 30)
+        body_lines.append(f"| {month} | {monthly[month]} {bar} |")
+    body_lines.append("")
+
+    body_lines.append("### By Weekday")
+    body_lines.append("")
+    for wd in range(7):
+        body_lines.append(f"- **{weekday_names[wd]}**: {by_weekday[wd]}")
+
+    write_md(base / "contributions.md", frontmatter, "\n".join(body_lines))
+    typer.echo(f"✓  Contribution Calendar: {total} contributions, {max_streak}-day max streak")
+    return stats
+
+
+def _calc_streak(weeks: list[dict]) -> int:
+    """최장 연속 기여 일수를 계산한다."""
+    max_streak = 0
+    current = 0
+    for week in weeks:
+        for day in week["contributionDays"]:
+            if day["contributionCount"] > 0:
+                current += 1
+                max_streak = max(max_streak, current)
+            else:
+                current = 0
+    return max_streak
+
+
+def _calc_current_streak(weeks: list[dict]) -> int:
+    """현재 연속 기여 일수를 계산한다 (오늘부터 역순)."""
+    all_days = []
+    for week in weeks:
+        for day in week["contributionDays"]:
+            all_days.append(day)
+    streak = 0
+    for day in reversed(all_days):
+        if day["contributionCount"] > 0:
+            streak += 1
+        else:
+            break
+    return streak

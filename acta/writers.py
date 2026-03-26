@@ -44,9 +44,11 @@ def generate_metadata(
     subdirs: list[str],
     issues: list[dict] | None = None,
     reviews: list[dict] | None = None,
+    pinned: list[dict] | None = None,
+    calendar: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write metadata.json and return the metadata dict."""
-    meta = {
+    meta: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "github_user": login,
         "period_days": days,
@@ -59,11 +61,16 @@ def generate_metadata(
             "stars": len(stars),
             "projects": len(projects),
             "organizations": len(orgs),
+            "pinned_repos": len(pinned or []),
         },
         "directories": {d: f"{d}/" for d in subdirs},
         "top_languages": _top_languages(repos),
         "top_starred_languages": _top_languages_from_stars(stars),
     }
+    if calendar:
+        meta["contribution_calendar"] = calendar
+    if pinned:
+        meta["pinned_repos"] = [p["name"] for p in pinned]
     (base / "metadata.json").write_text(
         json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -154,6 +161,8 @@ def generate_summary(
     stars: list[dict],
     projects: list[dict],
     orgs: list[dict],
+    pinned: list[dict] | None = None,
+    calendar: dict[str, Any] | None = None,
 ) -> None:
     """Write SUMMARY.md — LLM/사람이 한눈에 파악하는 활동 리포트."""
     lines = [
@@ -175,6 +184,25 @@ def generate_summary(
         f"| Organizations | {len(orgs)} |",
         "",
     ]
+
+    # Contribution Calendar summary
+    if calendar and calendar.get("total_contributions"):
+        lines.append("## Contribution Activity")
+        lines.append("")
+        lines.append(f"- **Total contributions**: {calendar['total_contributions']}")
+        lines.append(f"- **Active days**: {calendar.get('active_days', 0)}")
+        lines.append(f"- **Max streak**: {calendar.get('max_streak', 0)} days")
+        lines.append(f"- **Current streak**: {calendar.get('current_streak', 0)} days")
+        lines.append("")
+
+    # Pinned repositories
+    if pinned:
+        lines.append("## Pinned Repositories (Highlights)")
+        lines.append("")
+        for p in pinned:
+            lang = f" [{p.get('language', '')}]" if p.get('language') else ""
+            lines.append(f"- **{p['name']}**{lang} — {p.get('description', '')}")
+        lines.append("")
 
     # Monthly Activity
     monthly: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))

@@ -9,8 +9,11 @@ from acta.client import GitHubClient
 from acta.extractors import (
     extract_commits,
     extract_contributed_repos,
+    extract_contribution_calendar,
     extract_issues,
     extract_organizations,
+    extract_pinned_repos,
+    extract_profile,
     extract_projects,
     extract_pull_requests,
     extract_readmes,
@@ -695,3 +698,205 @@ class TestExtractOrganizations:
 
         assert len(orgs) == 1
         assert (tmp_path / "organizations" / "my-org.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# extract_profile
+# ---------------------------------------------------------------------------
+
+
+class TestExtractProfile:
+    def test_writes_profile_md(self, tmp_path: Path):
+        """프로필 정보를 profile.md에 저장한다."""
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {
+                "login": "testuser",
+                "name": "Test User",
+                "bio": "Developer and open source contributor",
+                "company": "ACME Corp",
+                "location": "Seoul, Korea",
+                "email": "test@example.com",
+                "websiteUrl": "https://example.com",
+                "twitterUsername": "testuser",
+                "avatarUrl": "https://avatars.githubusercontent.com/u/123",
+                "isHireable": True,
+                "createdAt": "2020-01-01T00:00:00Z",
+                "updatedAt": "2025-03-01T00:00:00Z",
+                "followers": {"totalCount": 100},
+                "following": {"totalCount": 50},
+                "repositories": {"totalCount": 30},
+                "gists": {"totalCount": 5},
+                "socialAccounts": {"nodes": [
+                    {"provider": "LINKEDIN", "displayName": "testuser", "url": "https://linkedin.com/in/testuser"},
+                ]},
+                "status": {"message": "Working on Acta", "emoji": ":rocket:"},
+            }}
+        ])
+
+        profile = extract_profile(client, tmp_path, "testuser")
+
+        assert profile["login"] == "testuser"
+        assert (tmp_path / "profile.md").exists()
+
+        content = (tmp_path / "profile.md").read_text()
+        assert "Test User" in content
+        assert "Seoul, Korea" in content
+        assert "ACME Corp" in content
+        assert "Hireable" in content
+        assert "LINKEDIN" in content
+        assert "Working on Acta" in content
+
+    def test_handles_empty_profile(self, tmp_path: Path):
+        """API 실패 시 빈 dict를 반환한다."""
+        client = FakeGitHubClient(graphql_responses=[None])
+
+        profile = extract_profile(client, tmp_path, "testuser")
+
+        assert profile == {}
+
+
+# ---------------------------------------------------------------------------
+# extract_pinned_repos
+# ---------------------------------------------------------------------------
+
+
+class TestExtractPinnedRepos:
+    def test_writes_pinned_md(self, tmp_path: Path):
+        """핀된 레포를 pinned.md에 저장한다."""
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"pinnedItems": {"nodes": [
+                {
+                    "name": "cool-project",
+                    "description": "A cool project",
+                    "url": "https://github.com/testuser/cool-project",
+                    "primaryLanguage": {"name": "Python"},
+                    "stargazerCount": 42,
+                    "forkCount": 5,
+                    "repositoryTopics": {"nodes": [{"topic": {"name": "cli"}}]},
+                    "isPrivate": False,
+                    "homepageUrl": "https://cool-project.dev",
+                },
+                {
+                    "name": "awesome-lib",
+                    "description": "An awesome library",
+                    "url": "https://github.com/testuser/awesome-lib",
+                    "primaryLanguage": {"name": "TypeScript"},
+                    "stargazerCount": 100,
+                    "forkCount": 20,
+                    "repositoryTopics": {"nodes": []},
+                    "isPrivate": False,
+                    "homepageUrl": None,
+                },
+            ]}}}
+        ])
+
+        pinned = extract_pinned_repos(client, tmp_path, "testuser")
+
+        assert len(pinned) == 2
+        assert pinned[0]["name"] == "cool-project"
+        assert pinned[1]["stars"] == 100
+        assert (tmp_path / "pinned.md").exists()
+
+        content = (tmp_path / "pinned.md").read_text()
+        assert "cool-project" in content
+        assert "awesome-lib" in content
+        assert "Python" in content
+        assert "cool-project.dev" in content
+
+    def test_handles_no_pinned_repos(self, tmp_path: Path):
+        """핀된 레포가 없으면 빈 리스트를 반환한다."""
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"pinnedItems": {"nodes": []}}}
+        ])
+
+        pinned = extract_pinned_repos(client, tmp_path, "testuser")
+
+        assert pinned == []
+
+
+# ---------------------------------------------------------------------------
+# extract_contribution_calendar
+# ---------------------------------------------------------------------------
+
+
+class TestExtractContributionCalendar:
+    def _make_calendar_response(self, daily_counts: list[tuple[str, int]]):
+        """테스트용 calendar 응답을 생성한다."""
+        weeks = []
+        current_week: list[dict] = []
+        for i, (date, count) in enumerate(daily_counts):
+            weekday = i % 7
+            current_week.append({"date": date, "contributionCount": count, "weekday": weekday})
+            if weekday == 6:
+                weeks.append({"contributionDays": current_week})
+                current_week = []
+        if current_week:
+            weeks.append({"contributionDays": current_week})
+
+        total = sum(c for _, c in daily_counts)
+        return {"user": {"contributionsCollection": {
+            "contributionCalendar": {
+                "totalContributions": total,
+                "weeks": weeks,
+            },
+            "totalCommitContributions": total - 5,
+            "totalPullRequestContributions": 3,
+            "totalPullRequestReviewContributions": 2,
+            "totalIssueContributions": 0,
+            "totalRepositoryContributions": 1,
+            "restrictedContributionsCount": 10,
+        }}}
+
+    def test_writes_contributions_md(self, tmp_path: Path):
+        """기여 캘린더를 contributions.md에 저장한다."""
+        daily = [
+            ("2025-01-01", 5),
+            ("2025-01-02", 3),
+            ("2025-01-03", 0),
+            ("2025-01-04", 7),
+            ("2025-01-05", 2),
+            ("2025-01-06", 0),
+            ("2025-01-07", 1),
+        ]
+        client = FakeGitHubClient(graphql_responses=[self._make_calendar_response(daily)])
+
+        stats = extract_contribution_calendar(client, tmp_path, "testuser", SINCE)
+
+        assert stats["total_contributions"] == 18
+        assert stats["active_days"] == 5
+        assert stats["max_daily"] == 7
+        assert stats["commits"] == 13
+        assert stats["private_contributions"] == 10
+        assert (tmp_path / "contributions.md").exists()
+
+        content = (tmp_path / "contributions.md").read_text()
+        assert "Total contributions" in content
+        assert "18" in content
+        assert "Monthly" in content
+        assert "Weekday" in content
+
+    def test_calculates_streak(self, tmp_path: Path):
+        """연속 기여 일수를 정확히 계산한다."""
+        daily = [
+            ("2025-01-01", 1),
+            ("2025-01-02", 2),
+            ("2025-01-03", 3),
+            ("2025-01-04", 0),
+            ("2025-01-05", 1),
+            ("2025-01-06", 1),
+            ("2025-01-07", 1),
+        ]
+        client = FakeGitHubClient(graphql_responses=[self._make_calendar_response(daily)])
+
+        stats = extract_contribution_calendar(client, tmp_path, "testuser", SINCE)
+
+        assert stats["max_streak"] == 3
+        assert stats["current_streak"] == 3
+
+    def test_handles_empty_calendar(self, tmp_path: Path):
+        """API 실패 시 빈 dict를 반환한다."""
+        client = FakeGitHubClient(graphql_responses=[None])
+
+        stats = extract_contribution_calendar(client, tmp_path, "testuser", SINCE)
+
+        assert stats == {}

@@ -26,12 +26,42 @@ def _mock_subprocess_run(*args, **kwargs):
     result = MagicMock()
     result.stdout = json.dumps({"data": {
         "user": {
-            "repositories": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
+            "login": "testuser",
+            "name": "Test User",
+            "bio": "",
+            "company": "",
+            "location": "",
+            "email": "",
+            "websiteUrl": "",
+            "twitterUsername": "",
+            "avatarUrl": "",
+            "isHireable": False,
+            "createdAt": "2020-01-01T00:00:00Z",
+            "updatedAt": "2025-01-01T00:00:00Z",
+            "followers": {"totalCount": 0},
+            "following": {"totalCount": 0},
+            "repositories": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [], "totalCount": 0},
+            "gists": {"totalCount": 0},
+            "socialAccounts": {"nodes": []},
+            "status": None,
+            "pinnedItems": {"nodes": []},
             "pullRequests": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
             "issues": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
-            "contributionsCollection": {"pullRequestReviewContributions": {
-                "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [],
-            }},
+            "contributionsCollection": {
+                "pullRequestReviewContributions": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [],
+                },
+                "contributionCalendar": {
+                    "totalContributions": 0,
+                    "weeks": [],
+                },
+                "totalCommitContributions": 0,
+                "totalPullRequestContributions": 0,
+                "totalPullRequestReviewContributions": 0,
+                "totalIssueContributions": 0,
+                "totalRepositoryContributions": 0,
+                "restrictedContributionsCount": 0,
+            },
             "projectsV2": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
         },
         "viewer": {

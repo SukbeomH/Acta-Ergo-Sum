@@ -51,6 +51,9 @@ app.py                 # 진입점
 | `extract_readmes` | REST | `readmes/*_readme.md` |
 | `extract_projects` | GraphQL | `projects/*.md` |
 | `extract_organizations` | REST | `organizations/*.md` |
+| `extract_profile` | GraphQL | `profile.md` |
+| `extract_pinned_repos` | GraphQL | `pinned.md` |
+| `extract_contribution_calendar` | GraphQL | `contributions.md` |
 
 ## Conventions
 
