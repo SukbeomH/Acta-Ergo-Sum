@@ -1,42 +1,54 @@
 # Acta Ergo Sum
 
-> *I act, therefore I am.* — GitHub 활동 데이터를 마크다운 지식 베이스로 구조화하는 CLI 도구.
+> *I act, therefore I am.* — GitHub 활동 데이터를 마크다운 지식 베이스로 구조화하고, 레포를 딥 분석하는 CLI 도구.
 
 ## Commands
 
 ```bash
-pip install -r requirements.txt       # Install deps
-python app.py run                     # Collect last 365 days
-python app.py run --days 90           # Custom period
-python app.py run --days 30 --skip-readmes  # Quick run
-python app.py whoami                  # Show authenticated user
+uv sync                                      # Install deps
+uv sync --extra mcp                          # Install with MCP support
+uv run python app.py run                     # Collect last 365 days
+uv run python app.py run --days 90           # Custom period
+uv run python app.py run --days 30 --skip-readmes  # Quick run
+uv run python app.py deep owner/repo         # Deep-analyze a repo
+uv run python app.py deep owner/repo --stdout # Pipe to LLM agent
+uv run python app.py mcp                     # Start MCP server
+uv run python app.py analyze -t profile      # Template-based analysis
+uv run python app.py whoami                  # Show authenticated user
+uv run pytest tests/ -v                      # Run tests (83)
+uv build                                     # Build for PyPI
 ```
 
 ## Architecture
 
 ```
-app.py (단일 파일, Typer CLI)
- └─ run()
-     ├─ extract_repositories()   → repositories/*.md
-     ├─ extract_commits()        → commits/YYYY-MM.md
-     ├─ extract_pull_requests()  → pull_requests/*.md
-     ├─ extract_readmes()        → readmes/*_readme.md
-     ├─ extract_stars()          → stars/YYYY-MM.md
-     ├─ extract_projects()       → projects/*.md
-     ├─ extract_organizations()  → organizations/*.md
-     ├─ generate_metadata()      → metadata.json
-     └─ generate_timeline()      → timeline.csv
+acta/
+├── client.py              # GitHubClient (gh CLI wrapping, REST/GraphQL)
+├── extractors.py          # 13 extract_* functions (DI-based)
+├── writers.py             # MD/JSON/CSV/Summary output
+├── cli.py                 # Typer CLI (run, deep, mcp, analyze, whoami)
+├── analyzer.py            # Template-based prompt builder
+├── mcp_server.py          # FastMCP server (4 tools)
+└── deep/
+    ├── collector.py       # Repo deep analysis data collection
+    ├── detector.py        # Key file / entry point auto-detection
+    └── renderer.py        # Deep analysis markdown rendering
+app.py                     # Entry point
 ```
 
-- **Tech Stack**: Python 3.12+, Typer, GitHub CLI (`gh`)
-- **gh 호출**: `_run_gh()` / `_run_gh_graphql()` — pagination + rate-limit back-off 자동 처리
+- **Tech Stack**: Python 3.12+, Typer, GitHub CLI (`gh`), hatchling (build), FastMCP (optional)
+- **gh 호출**: `GitHubClient.rest()` / `.graphql()` — retry + rate-limit back-off
 - **출력**: YAML Frontmatter 마크다운 + `metadata.json` + `timeline.csv`
+- **배포**: PyPI (`acta-ergo-sum`), uvx/pipx/pip 지원
 
 ## Key Conventions
 
-- 단일 파일 구조 (`app.py`) — 모듈 분리 시 Ask First
+- `uv` 기반 패키지 관리 (pip/poetry 사용 금지)
 - `gh` CLI 인증 필수 (`gh auth login`)
-- 출력 디렉토리 기본값: `./acta_data`
+- 모듈 구조: `acta/` 패키지 + `acta/deep/` 서브패키지
+- 테스트: `FakeGitHubClient`로 subprocess 격리
+- 빌드: `uv build` → hatchling
+- CI/CD: GitHub Actions (test matrix 3.12/3.13, PyPI OIDC publish on tag)
 
 ---
 
@@ -75,7 +87,6 @@ SPEC.md → PLAN.md → EXECUTE → VERIFY. Working docs in `.hxsk/`
 
 ### Ask First
 - Adding external dependencies
-- `app.py` 단일 파일에서 모듈 분리
 - Architectural decisions affecting 3+ functions
 
 ### Never
