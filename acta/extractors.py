@@ -975,7 +975,6 @@ query($login: String!) {
     bio
     company
     location
-    email
     websiteUrl
     twitterUsername
     avatarUrl
@@ -1022,7 +1021,6 @@ def extract_profile(
         "bio": (user.get("bio") or "").strip(),
         "company": user.get("company") or "",
         "location": user.get("location") or "",
-        "email": user.get("email") or "",
         "website": user.get("websiteUrl") or "",
         "twitter": user.get("twitterUsername") or "",
         "avatar_url": user.get("avatarUrl") or "",

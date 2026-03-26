@@ -31,7 +31,6 @@ def _mock_subprocess_run(*args, **kwargs):
             "bio": "",
             "company": "",
             "location": "",
-            "email": "",
             "websiteUrl": "",
             "twitterUsername": "",
             "avatarUrl": "",

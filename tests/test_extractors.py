@@ -715,7 +715,6 @@ class TestExtractProfile:
                 "bio": "Developer and open source contributor",
                 "company": "ACME Corp",
                 "location": "Seoul, Korea",
-                "email": "test@example.com",
                 "websiteUrl": "https://example.com",
                 "twitterUsername": "testuser",
                 "avatarUrl": "https://avatars.githubusercontent.com/u/123",
