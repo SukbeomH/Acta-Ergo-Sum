@@ -143,15 +143,30 @@ class DeepCollector:
 
     # -- Structure --
 
-    def fetch_tree(self) -> list[str]:
-        """전체 파일 트리를 가져온다 (recursive)."""
+    def fetch_tree(self, default_branch: str = "") -> list[str]:
+        """전체 파일 트리를 가져온다 (recursive).
+
+        default_branch: overview에서 가져온 기본 브랜치 이름. 없으면 API에서 조회 후 main/master 순서로 시도.
+        """
         typer.echo("  → file tree…")
-        # default branch의 tree SHA 필요
-        ref_data = self.client.rest(f"/repos/{self.owner}/{self.repo}/git/ref/heads/main")
-        if not ref_data or not isinstance(ref_data, dict):
-            # main이 아닌 경우 master 시도
-            ref_data = self.client.rest(f"/repos/{self.owner}/{self.repo}/git/ref/heads/master")
-        if not ref_data or not isinstance(ref_data, dict):
+        branches = [default_branch] if default_branch else []
+        # default branch를 모르면 REST에서 조회
+        if not default_branch:
+            repo_data = self.client.rest(f"/repos/{self.owner}/{self.repo}")
+            if isinstance(repo_data, dict) and repo_data.get("default_branch"):
+                branches.insert(0, repo_data["default_branch"])
+        branches += ["main", "master"]
+
+        ref_data = None
+        for branch in branches:
+            if not branch:
+                continue
+            ref_data = self.client.rest(f"/repos/{self.owner}/{self.repo}/git/ref/heads/{branch}")
+            if ref_data and isinstance(ref_data, dict) and "object" in ref_data:
+                break
+            ref_data = None
+
+        if not ref_data:
             return []
 
         commit_sha = ref_data.get("object", {}).get("sha", "")
@@ -168,8 +183,7 @@ class DeepCollector:
             return []
 
         tree_data = self.client.rest(
-            f"/repos/{self.owner}/{self.repo}/git/trees/{tree_sha}",
-            recursive="1",
+            f"/repos/{self.owner}/{self.repo}/git/trees/{tree_sha}?recursive=1",
         )
         if not tree_data or not isinstance(tree_data, dict):
             return []
@@ -231,8 +245,7 @@ class DeepCollector:
         """최근 커밋을 가져온다."""
         typer.echo("  → recent commits…")
         data = self.client.rest(
-            f"/repos/{self.owner}/{self.repo}/commits",
-            per_page=str(limit),
+            f"/repos/{self.owner}/{self.repo}/commits?per_page={limit}",
         )
         if not isinstance(data, list):
             return []

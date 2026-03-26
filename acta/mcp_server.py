@@ -77,8 +77,10 @@ def deep_analyze_repo(
     if any(s in all_sections for s in ["overview", "community"]):
         overview_data = collector.fetch_overview()
 
+    default_branch = (overview_data.get("defaultBranchRef") or {}).get("name", "")
+
     if any(s in all_sections for s in ["structure", "tech_stack"]):
-        tree_paths = collector.fetch_tree()
+        tree_paths = collector.fetch_tree(default_branch=default_branch)
         languages = collector.fetch_languages()
 
     # 섹션별 렌더링

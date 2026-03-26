@@ -265,7 +265,8 @@ def deep(
         raise typer.Exit(code=1)
 
     readme = collector.fetch_readme()
-    tree_paths = collector.fetch_tree()
+    default_branch = (overview.get("defaultBranchRef") or {}).get("name", "")
+    tree_paths = collector.fetch_tree(default_branch=default_branch)
     languages = collector.fetch_languages()
 
     # 핵심 파일 내용 수집
