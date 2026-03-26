@@ -2,9 +2,14 @@
 
 This file provides guidance to Claude Code when working with this repository.
 
+See @AGENTS.md for shared project instructions (workflow, memory protocol, validation, agent boundaries).
+
 ## Project Overview
 
 **Acta Ergo Sum** — GitHub 활동 데이터를 LLM 친화적 Markdown 지식 베이스로 수집하는 CLI 도구.
+
+### Document Hierarchy
+- **문서 계층**: L1=CLAUDE.md (요약) → L2=skills/SKILL.md (상세) → L3=.hxsk/research/ (출처)
 
 ## Commands
 
