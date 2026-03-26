@@ -42,7 +42,14 @@ class FakeGitHubClient(GitHubClient):
             resp = self._rest_sequence[self._rest_call_index]
             self._rest_call_index += 1
             return resp
-        return self._rest_responses.get(endpoint)
+        # 정확한 키 매칭
+        if endpoint in self._rest_responses:
+            return self._rest_responses[endpoint]
+        # 접두사 매칭 (e.g. "/repos/user/" → 모든 /repos/user/* 매칭)
+        for key, val in self._rest_responses.items():
+            if key.endswith("*") and endpoint.startswith(key[:-1]):
+                return val
+        return None
 
     def graphql(self, query: str, variables: dict) -> dict | None:
         if self._graphql_call_index < len(self._graphql_responses):
@@ -101,6 +108,32 @@ class TestExtractRepositories:
 
         content = (tmp_path / "repositories" / "repo-a.md").read_text()
         assert "name: repo-a" in content
+        # rich body 검증
+        assert "**Language**:" in content
+        assert "**Stars**:" in content
+        assert "Description of repo-a" in content
+
+    def test_includes_language_breakdown(self, tmp_path: Path):
+        """repositories/*.md frontmatter에 언어 비율이 포함된다."""
+        nodes = [_make_repo_node("my-repo")]
+        client = FakeGitHubClient(
+            graphql_responses=[
+                {"user": {"repositories": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": nodes,
+                }}}
+            ],
+            rest_responses={
+                "/repos/user/my-repo/languages": {"Python": 50000, "JavaScript": 30000, "Shell": 5000},
+            },
+        )
+
+        repos = extract_repositories(client, tmp_path, "user", SINCE)
+
+        content = (tmp_path / "repositories" / "my-repo.md").read_text()
+        assert "Python:" in content
+        assert "58" in content  # 58.8%
+        assert "JavaScript:" in content
 
     def test_handles_pagination(self, tmp_path: Path):
         """여러 페이지를 순회하여 모든 레포를 가져온다."""
@@ -201,6 +234,45 @@ class TestExtractCommits:
         assert md_path.exists()
         content = md_path.read_text()
         assert "abc1234" in content
+
+    def test_includes_additions_deletions(self, tmp_path: Path):
+        """커밋에 additions/deletions가 포함되고 월별 MD에 합산 표시된다."""
+        repos = [_make_repo_node("my-repo")]
+        commit_nodes = [
+            {
+                "oid": "aaa1111111111",
+                "message": "feat: add feature",
+                "committedDate": "2025-02-10T10:00:00Z",
+                "additions": 150,
+                "deletions": 30,
+                "author": {"name": "User", "email": "u@e.com", "user": {"login": "testuser"}},
+            },
+            {
+                "oid": "bbb2222222222",
+                "message": "fix: bug",
+                "committedDate": "2025-02-15T10:00:00Z",
+                "additions": 10,
+                "deletions": 5,
+                "author": {"name": "User", "email": "u@e.com", "user": {"login": "testuser"}},
+            },
+        ]
+        client = FakeGitHubClient(graphql_responses=[
+            {"repository": {"defaultBranchRef": {"target": {"history": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": commit_nodes,
+            }}}}}
+        ])
+
+        commits = extract_commits(client, tmp_path, "testuser", repos, SINCE)
+
+        assert commits[0]["additions"] == 150
+        assert commits[0]["deletions"] == 30
+        assert commits[1]["additions"] == 10
+
+        md_path = tmp_path / "commits" / "2025-02.md"
+        content = md_path.read_text()
+        assert "+160" in content  # 150 + 10
+        assert "-35" in content   # 30 + 5
 
     def test_skips_forks(self, tmp_path: Path):
         """fork 레포는 건너뛴다."""
@@ -354,6 +426,13 @@ class TestExtractStars:
         assert len(stars) == 2
         assert (tmp_path / "stars" / "2025-02.md").exists()
         assert (tmp_path / "stars" / "2025-01.md").exists()
+
+        # 상세 정보 검증
+        content = (tmp_path / "stars" / "2025-02.md").read_text()
+        assert "cool/lib" in content
+        assert "Rust" in content
+        assert "Stars:" in content
+        assert "Desc of cool/lib" in content
 
     def test_paginates_multiple_pages(self, tmp_path: Path):
         """여러 페이지를 순회하여 모든 starred repos를 수집한다."""

@@ -221,13 +221,30 @@ def generate_summary(
             lines.append(f"- **{repo}**: {count} commits")
         lines.append("")
 
-    # Recent PRs
-    if prs:
+    # PR 분류: 내 레포 vs 외부 기여
+    own_prs = [p for p in prs if p["repository"]["nameWithOwner"].startswith(f"{login}/")]
+    external_prs = [p for p in prs if not p["repository"]["nameWithOwner"].startswith(f"{login}/")]
+
+    if own_prs:
         lines.append("## Recent Pull Requests")
         lines.append("")
-        for pr in sorted(prs, key=lambda x: x["createdAt"], reverse=True)[:10]:
+        for pr in sorted(own_prs, key=lambda x: x["createdAt"], reverse=True)[:10]:
             repo = pr["repository"]["nameWithOwner"]
             lines.append(f"- [{pr['state']}] **{repo}** #{pr.get('number', '')} {pr['title']}")
+        lines.append("")
+
+    if external_prs:
+        lines.append("## External Contributions")
+        lines.append("")
+        # 레포별 그룹핑
+        ext_by_repo: dict[str, list[dict]] = defaultdict(list)
+        for pr in external_prs:
+            ext_by_repo[pr["repository"]["nameWithOwner"]].append(pr)
+        for repo, repo_prs in sorted(ext_by_repo.items()):
+            merged = sum(1 for p in repo_prs if p["state"] == "MERGED")
+            lines.append(f"- **{repo}** — {len(repo_prs)} PRs ({merged} merged)")
+            for pr in sorted(repo_prs, key=lambda x: x["createdAt"], reverse=True)[:5]:
+                lines.append(f"  - [{pr['state']}] #{pr.get('number', '')} {pr['title']}")
         lines.append("")
 
     (base / "SUMMARY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

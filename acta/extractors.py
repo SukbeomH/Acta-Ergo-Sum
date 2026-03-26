@@ -60,6 +60,8 @@ query($owner: String!, $name: String!, $since: GitTimestamp!, $after: String) {
               oid
               message
               committedDate
+              additions
+              deletions
               author { name email user { login } }
             }
           }
@@ -119,6 +121,18 @@ def _iso_to_dt(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
 
+def _fetch_language_breakdown(client: GitHubClient, owner: str, repo_name: str) -> list[str]:
+    """REST API로 레포의 언어 비율을 가져온다. 퍼센트 문자열 리스트 반환."""
+    data = client.rest(f"/repos/{owner}/{repo_name}/languages")
+    if not isinstance(data, dict) or not data:
+        return []
+    total = sum(data.values())
+    if total == 0:
+        return []
+    return [f"{lang}: {bytes_val / total * 100:.1f}%" for lang, bytes_val in
+            sorted(data.items(), key=lambda x: -x[1])]
+
+
 # ---------------------------------------------------------------------------
 # 1. Repositories
 # ---------------------------------------------------------------------------
@@ -157,6 +171,7 @@ def extract_repositories(
         topics = [n["topic"]["name"] for n in repo.get("repositoryTopics", {}).get("nodes", [])]
         lang = repo.get("primaryLanguage") or {}
         branch = repo.get("defaultBranchRef") or {}
+        languages = _fetch_language_breakdown(client, login, repo["name"])
 
         frontmatter: dict[str, Any] = {
             "name": repo["name"],
@@ -165,6 +180,7 @@ def extract_repositories(
             "updated_at": repo["updatedAt"],
             "pushed_at": repo.get("pushedAt", ""),
             "language": lang.get("name", ""),
+            "languages": languages,
             "topics": topics,
             "is_fork": repo["isFork"],
             "is_private": repo["isPrivate"],
@@ -173,9 +189,20 @@ def extract_repositories(
             "default_branch": branch.get("name", "main"),
         }
         desc = repo.get("description") or ""
-        body = f"## {repo['name']}\n\n{desc}" if desc else f"## {repo['name']}"
-        write_md(base / "repositories" / f"{repo['name']}.md", frontmatter, body)
+        body_lines = [f"## {repo['name']}"]
+        if desc:
+            body_lines.append(f"\n> {desc}")
+        body_lines.append("")
+        body_lines.append(f"- **Language**: {lang.get('name', 'N/A')}")
+        if languages:
+            body_lines.append(f"- **Breakdown**: {', '.join(languages[:5])}")
+        body_lines.append(f"- **Stars**: {repo['stargazerCount']} | **Forks**: {repo['forkCount']}")
+        body_lines.append(f"- **Last push**: {repo.get('pushedAt', 'N/A')[:10]}")
+        if topics:
+            body_lines.append(f"- **Topics**: {', '.join(topics)}")
+        write_md(base / "repositories" / f"{repo['name']}.md", frontmatter, "\n".join(body_lines))
         written += 1
+        time.sleep(client.rate_limit_delay)
 
     typer.echo(f"✓  Repositories: {written} files written")
     return repos
@@ -254,6 +281,7 @@ def extract_contributed_repos(
         topics = [n["topic"]["name"] for n in repo.get("repositoryTopics", {}).get("nodes", [])]
         lang = repo.get("primaryLanguage") or {}
         branch = repo.get("defaultBranchRef") or {}
+        languages = _fetch_language_breakdown(client, login, repo["name"])
 
         frontmatter: dict[str, Any] = {
             "name": repo["name"],
@@ -262,6 +290,7 @@ def extract_contributed_repos(
             "updated_at": repo["updatedAt"],
             "pushed_at": repo.get("pushedAt", ""),
             "language": lang.get("name", ""),
+            "languages": languages,
             "topics": topics,
             "is_fork": repo["isFork"],
             "is_private": repo["isPrivate"],
@@ -271,9 +300,21 @@ def extract_contributed_repos(
             "contributed": True,
         }
         desc = repo.get("description") or ""
-        body = f"## {repo['name']}\n\n{desc}" if desc else f"## {repo['name']}"
-        write_md(base / "repositories" / f"{repo['name']}.md", frontmatter, body)
+        body_lines = [f"## {repo['name']}"]
+        if desc:
+            body_lines.append(f"\n> {desc}")
+        body_lines.append("")
+        body_lines.append(f"- **Language**: {lang.get('name', 'N/A')}")
+        if languages:
+            body_lines.append(f"- **Breakdown**: {', '.join(languages[:5])}")
+        body_lines.append(f"- **Stars**: {repo['stargazerCount']} | **Forks**: {repo['forkCount']}")
+        body_lines.append(f"- **Last push**: {repo.get('pushedAt', 'N/A')[:10]}")
+        if topics:
+            body_lines.append(f"- **Topics**: {', '.join(topics)}")
+        body_lines.append(f"- **Contributed**: Yes")
+        write_md(base / "repositories" / f"{repo['name']}.md", frontmatter, "\n".join(body_lines))
         written += 1
+        time.sleep(client.rate_limit_delay)
 
     typer.echo(f"✓  Contributed Repositories: {written} files written")
     return repos
@@ -329,6 +370,8 @@ def extract_commits(
                     "sha": node["oid"][:7],
                     "message": node["message"].split("\n")[0],
                     "date": node["committedDate"],
+                    "additions": node.get("additions", 0),
+                    "deletions": node.get("deletions", 0),
                 }
                 by_month[month].append(entry)
                 all_commits.append(entry)
@@ -347,9 +390,14 @@ def extract_commits(
             "total": len(entries),
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
+        total_add = sum(e.get("additions", 0) for e in entries)
+        total_del = sum(e.get("deletions", 0) for e in entries)
         lines = [f"## Commits — {month}", ""]
+        lines.append(f"**Total: +{total_add} / -{total_del}**")
+        lines.append("")
         for e in sorted(entries, key=lambda x: x["date"]):
-            lines.append(f"- `{e['date'][:10]}` **{e['repo']}** `{e['sha']}` {e['message']}")
+            diff = f" (+{e.get('additions', 0)}/-{e.get('deletions', 0)})"
+            lines.append(f"- `{e['date'][:10]}` **{e['repo']}** `{e['sha']}` {e['message']}{diff}")
         write_md(base / "commits" / f"{month}.md", frontmatter, "\n".join(lines))
 
     typer.echo(f"✓  Commits: {len(all_commits)} commits across {len(by_month)} months")
@@ -585,6 +633,7 @@ def extract_stars(
             lines.append(f"### [{e['name']}]({e['url']})")
             lines.append(f"- **Starred:** {e['starred_at'][:10]}")
             lines.append(f"- **Language:** {e['language']}")
+            lines.append(f"- **Stars:** {e.get('stars', 0):,}")
             if e["description"]:
                 lines.append(f"- **Description:** {e['description']}")
             if topic_str:

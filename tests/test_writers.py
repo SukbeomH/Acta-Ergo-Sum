@@ -171,6 +171,25 @@ class TestGenerateSummary:
         assert "## Monthly Activity" in content
         assert "## Top Languages" in content
 
+    def test_separates_external_contributions(self, tmp_path: Path):
+        """외부 레포 PR이 별도 섹션으로 분류된다."""
+        prs = [
+            {"createdAt": "2025-02-01T00:00:00Z", "state": "MERGED", "title": "My PR",
+             "repository": {"nameWithOwner": "testuser/my-repo"}, "number": 1},
+            {"createdAt": "2025-02-02T00:00:00Z", "state": "MERGED", "title": "OSS contribution",
+             "repository": {"nameWithOwner": "other-org/cool-project"}, "number": 42},
+        ]
+
+        generate_summary(
+            base=tmp_path, login="testuser", days=30,
+            repos=[], commits=[], prs=prs,
+            issues=[], reviews=[], stars=[], projects=[], orgs=[],
+        )
+
+        content = (tmp_path / "SUMMARY.md").read_text()
+        assert "External Contributions" in content
+        assert "other-org/cool-project" in content
+
     def test_handles_empty_data(self, tmp_path: Path):
         """모든 데이터가 비어있어도 정상 생성된다."""
         generate_summary(
