@@ -42,6 +42,8 @@ def generate_metadata(
     projects: list[dict],
     orgs: list[dict],
     subdirs: list[str],
+    issues: list[dict] | None = None,
+    reviews: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Write metadata.json and return the metadata dict."""
     meta = {
@@ -52,6 +54,8 @@ def generate_metadata(
             "repositories": len(repos),
             "commits": len(commits),
             "pull_requests": len(prs),
+            "issues": len(issues or []),
+            "reviews": len(reviews or []),
             "stars": len(stars),
             "projects": len(projects),
             "organizations": len(orgs),
@@ -71,6 +75,8 @@ def generate_timeline(
     commits: list[dict],
     prs: list[dict],
     stars: list[dict],
+    issues: list[dict] | None = None,
+    reviews: list[dict] | None = None,
 ) -> list[dict[str, str]]:
     """Write timeline.csv and return the rows."""
     rows: list[dict[str, str]] = []
@@ -95,6 +101,26 @@ def generate_timeline(
             }
         )
 
+    for issue in (issues or []):
+        rows.append(
+            {
+                "date": issue["createdAt"][:10],
+                "category": "Issue",
+                "repository": issue["repository"]["nameWithOwner"],
+                "action": f"[{issue['state']}] {issue['title'][:120]}",
+            }
+        )
+
+    for r in (reviews or []):
+        rows.append(
+            {
+                "date": r["date"][:10],
+                "category": "Review",
+                "repository": r["repository"],
+                "action": f"[{r['state']}] PR #{r['pr_number']}: {r['pr_title'][:100]}",
+            }
+        )
+
     for s in stars:
         rows.append(
             {
@@ -114,6 +140,114 @@ def generate_timeline(
         writer.writerows(rows)
 
     return rows
+
+
+def generate_summary(
+    base: Path,
+    login: str,
+    days: int,
+    repos: list[dict],
+    commits: list[dict],
+    prs: list[dict],
+    issues: list[dict],
+    reviews: list[dict],
+    stars: list[dict],
+    projects: list[dict],
+    orgs: list[dict],
+) -> None:
+    """Write SUMMARY.md — LLM/사람이 한눈에 파악하는 활동 리포트."""
+    lines = [
+        f"# GitHub Activity Summary — {login}",
+        "",
+        f"Period: last {days} days",
+        "",
+        "## Overview",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        f"| Repositories | {len(repos)} |",
+        f"| Commits | {len(commits)} |",
+        f"| Pull Requests | {len(prs)} |",
+        f"| Issues | {len(issues)} |",
+        f"| Code Reviews | {len(reviews)} |",
+        f"| Stars | {len(stars)} |",
+        f"| Projects | {len(projects)} |",
+        f"| Organizations | {len(orgs)} |",
+        "",
+    ]
+
+    # Monthly Activity
+    monthly: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for c in commits:
+        monthly[c["date"][:7]]["commits"] += 1
+    for pr in prs:
+        monthly[pr["createdAt"][:7]]["prs"] += 1
+    for issue in issues:
+        monthly[issue["createdAt"][:7]]["issues"] += 1
+    for r in reviews:
+        monthly[r["date"][:7]]["reviews"] += 1
+
+    lines.append("## Monthly Activity")
+    lines.append("")
+    if monthly:
+        lines.append("| Month | Commits | PRs | Issues | Reviews |")
+        lines.append("|---|---|---|---|---|")
+        for month in sorted(monthly.keys()):
+            m = monthly[month]
+            lines.append(f"| {month} | {m['commits']} | {m['prs']} | {m['issues']} | {m['reviews']} |")
+    else:
+        lines.append("No activity recorded.")
+    lines.append("")
+
+    # Top Languages
+    langs = _top_languages(repos)
+    lines.append("## Top Languages")
+    lines.append("")
+    if langs:
+        for lang, count in langs.items():
+            lines.append(f"- **{lang}**: {count} repos")
+    else:
+        lines.append("No language data.")
+    lines.append("")
+
+    # Most Active Repos
+    repo_commits: dict[str, int] = defaultdict(int)
+    for c in commits:
+        repo_commits[c["repo"]] += 1
+    if repo_commits:
+        lines.append("## Most Active Repositories")
+        lines.append("")
+        for repo, count in sorted(repo_commits.items(), key=lambda x: -x[1])[:10]:
+            lines.append(f"- **{repo}**: {count} commits")
+        lines.append("")
+
+    # PR 분류: 내 레포 vs 외부 기여
+    own_prs = [p for p in prs if p["repository"]["nameWithOwner"].startswith(f"{login}/")]
+    external_prs = [p for p in prs if not p["repository"]["nameWithOwner"].startswith(f"{login}/")]
+
+    if own_prs:
+        lines.append("## Recent Pull Requests")
+        lines.append("")
+        for pr in sorted(own_prs, key=lambda x: x["createdAt"], reverse=True)[:10]:
+            repo = pr["repository"]["nameWithOwner"]
+            lines.append(f"- [{pr['state']}] **{repo}** #{pr.get('number', '')} {pr['title']}")
+        lines.append("")
+
+    if external_prs:
+        lines.append("## External Contributions")
+        lines.append("")
+        # 레포별 그룹핑
+        ext_by_repo: dict[str, list[dict]] = defaultdict(list)
+        for pr in external_prs:
+            ext_by_repo[pr["repository"]["nameWithOwner"]].append(pr)
+        for repo, repo_prs in sorted(ext_by_repo.items()):
+            merged = sum(1 for p in repo_prs if p["state"] == "MERGED")
+            lines.append(f"- **{repo}** — {len(repo_prs)} PRs ({merged} merged)")
+            for pr in sorted(repo_prs, key=lambda x: x["createdAt"], reverse=True)[:5]:
+                lines.append(f"  - [{pr['state']}] #{pr.get('number', '')} {pr['title']}")
+        lines.append("")
+
+    (base / "SUMMARY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _top_languages(repos: list[dict]) -> dict[str, int]:

@@ -60,6 +60,8 @@ query($owner: String!, $name: String!, $since: GitTimestamp!, $after: String) {
               oid
               message
               committedDate
+              additions
+              deletions
               author { name email user { login } }
             }
           }
@@ -119,6 +121,18 @@ def _iso_to_dt(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
 
+def _fetch_language_breakdown(client: GitHubClient, owner: str, repo_name: str) -> list[str]:
+    """REST API로 레포의 언어 비율을 가져온다. 퍼센트 문자열 리스트 반환."""
+    data = client.rest(f"/repos/{owner}/{repo_name}/languages")
+    if not isinstance(data, dict) or not data:
+        return []
+    total = sum(data.values())
+    if total == 0:
+        return []
+    return [f"{lang}: {bytes_val / total * 100:.1f}%" for lang, bytes_val in
+            sorted(data.items(), key=lambda x: -x[1])]
+
+
 # ---------------------------------------------------------------------------
 # 1. Repositories
 # ---------------------------------------------------------------------------
@@ -157,6 +171,7 @@ def extract_repositories(
         topics = [n["topic"]["name"] for n in repo.get("repositoryTopics", {}).get("nodes", [])]
         lang = repo.get("primaryLanguage") or {}
         branch = repo.get("defaultBranchRef") or {}
+        languages = _fetch_language_breakdown(client, login, repo["name"])
 
         frontmatter: dict[str, Any] = {
             "name": repo["name"],
@@ -165,6 +180,7 @@ def extract_repositories(
             "updated_at": repo["updatedAt"],
             "pushed_at": repo.get("pushedAt", ""),
             "language": lang.get("name", ""),
+            "languages": languages,
             "topics": topics,
             "is_fork": repo["isFork"],
             "is_private": repo["isPrivate"],
@@ -173,11 +189,134 @@ def extract_repositories(
             "default_branch": branch.get("name", "main"),
         }
         desc = repo.get("description") or ""
-        body = f"## {repo['name']}\n\n{desc}" if desc else f"## {repo['name']}"
-        write_md(base / "repositories" / f"{repo['name']}.md", frontmatter, body)
+        body_lines = [f"## {repo['name']}"]
+        if desc:
+            body_lines.append(f"\n> {desc}")
+        body_lines.append("")
+        body_lines.append(f"- **Language**: {lang.get('name', 'N/A')}")
+        if languages:
+            body_lines.append(f"- **Breakdown**: {', '.join(languages[:5])}")
+        body_lines.append(f"- **Stars**: {repo['stargazerCount']} | **Forks**: {repo['forkCount']}")
+        body_lines.append(f"- **Last push**: {repo.get('pushedAt', 'N/A')[:10]}")
+        if topics:
+            body_lines.append(f"- **Topics**: {', '.join(topics)}")
+        write_md(base / "repositories" / f"{repo['name']}.md", frontmatter, "\n".join(body_lines))
         written += 1
+        time.sleep(client.rate_limit_delay)
 
     typer.echo(f"✓  Repositories: {written} files written")
+    return repos
+
+
+# ---------------------------------------------------------------------------
+# 1b. Contributed Repositories
+# ---------------------------------------------------------------------------
+
+_CONTRIBUTED_REPO_QUERY = """
+query($login: String!, $after: String) {
+  user(login: $login) {
+    repositories(
+      first: 100
+      after: $after
+      orderBy: {field: UPDATED_AT, direction: DESC}
+      ownerAffiliations: [COLLABORATOR, ORGANIZATION_MEMBER]
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        name
+        description
+        url
+        createdAt
+        updatedAt
+        pushedAt
+        primaryLanguage { name }
+        repositoryTopics(first: 20) { nodes { topic { name } } }
+        isFork
+        isPrivate
+        stargazerCount
+        forkCount
+        defaultBranchRef { name }
+      }
+    }
+  }
+}
+"""
+
+
+def extract_contributed_repos(
+    client: GitHubClient, base: Path, login: str, since: datetime,
+    exclude_names: set[str] | None = None,
+) -> list[dict]:
+    """COLLABORATOR/ORG_MEMBER 레포를 수집한다. exclude_names에 있는 레포는 제외."""
+    typer.echo("→  Extracting contributed repositories…")
+    exclude = exclude_names or set()
+    cursor: Optional[str] = None
+    repos: list[dict] = []
+    page = 0
+
+    while True:
+        variables: dict[str, Any] = {"login": login}
+        if cursor:
+            variables["after"] = cursor
+
+        data = client.graphql(_CONTRIBUTED_REPO_QUERY, variables)
+        if not data:
+            break
+
+        page_data = data["user"]["repositories"]
+        nodes = page_data["nodes"]
+        for node in nodes:
+            if node["name"] not in exclude:
+                repos.append(node)
+        page += 1
+        typer.echo(f"   page {page}: {len(nodes)} repos ({len(repos)} after dedup)")
+
+        if not page_data["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page_data["pageInfo"]["endCursor"]
+        time.sleep(client.rate_limit_delay)
+
+    written = 0
+    for repo in repos:
+        topics = [n["topic"]["name"] for n in repo.get("repositoryTopics", {}).get("nodes", [])]
+        lang = repo.get("primaryLanguage") or {}
+        branch = repo.get("defaultBranchRef") or {}
+        languages = _fetch_language_breakdown(client, login, repo["name"])
+
+        frontmatter: dict[str, Any] = {
+            "name": repo["name"],
+            "url": repo["url"],
+            "created_at": repo["createdAt"],
+            "updated_at": repo["updatedAt"],
+            "pushed_at": repo.get("pushedAt", ""),
+            "language": lang.get("name", ""),
+            "languages": languages,
+            "topics": topics,
+            "is_fork": repo["isFork"],
+            "is_private": repo["isPrivate"],
+            "stars": repo["stargazerCount"],
+            "forks": repo["forkCount"],
+            "default_branch": branch.get("name", "main"),
+            "contributed": True,
+        }
+        desc = repo.get("description") or ""
+        body_lines = [f"## {repo['name']}"]
+        if desc:
+            body_lines.append(f"\n> {desc}")
+        body_lines.append("")
+        body_lines.append(f"- **Language**: {lang.get('name', 'N/A')}")
+        if languages:
+            body_lines.append(f"- **Breakdown**: {', '.join(languages[:5])}")
+        body_lines.append(f"- **Stars**: {repo['stargazerCount']} | **Forks**: {repo['forkCount']}")
+        body_lines.append(f"- **Last push**: {repo.get('pushedAt', 'N/A')[:10]}")
+        if topics:
+            body_lines.append(f"- **Topics**: {', '.join(topics)}")
+        body_lines.append(f"- **Contributed**: Yes")
+        write_md(base / "repositories" / f"{repo['name']}.md", frontmatter, "\n".join(body_lines))
+        written += 1
+        time.sleep(client.rate_limit_delay)
+
+    typer.echo(f"✓  Contributed Repositories: {written} files written")
     return repos
 
 
@@ -231,6 +370,8 @@ def extract_commits(
                     "sha": node["oid"][:7],
                     "message": node["message"].split("\n")[0],
                     "date": node["committedDate"],
+                    "additions": node.get("additions", 0),
+                    "deletions": node.get("deletions", 0),
                 }
                 by_month[month].append(entry)
                 all_commits.append(entry)
@@ -249,9 +390,14 @@ def extract_commits(
             "total": len(entries),
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
+        total_add = sum(e.get("additions", 0) for e in entries)
+        total_del = sum(e.get("deletions", 0) for e in entries)
         lines = [f"## Commits — {month}", ""]
+        lines.append(f"**Total: +{total_add} / -{total_del}**")
+        lines.append("")
         for e in sorted(entries, key=lambda x: x["date"]):
-            lines.append(f"- `{e['date'][:10]}` **{e['repo']}** `{e['sha']}` {e['message']}")
+            diff = f" (+{e.get('additions', 0)}/-{e.get('deletions', 0)})"
+            lines.append(f"- `{e['date'][:10]}` **{e['repo']}** `{e['sha']}` {e['message']}{diff}")
         write_md(base / "commits" / f"{month}.md", frontmatter, "\n".join(lines))
 
     typer.echo(f"✓  Commits: {len(all_commits)} commits across {len(by_month)} months")
@@ -396,61 +542,82 @@ def extract_readmes(
 
 
 # ---------------------------------------------------------------------------
-# 5. Stars
+# 5. Stars (GraphQL)
 # ---------------------------------------------------------------------------
+
+_STARS_QUERY = """
+query($after: String) {
+  viewer {
+    starredRepositories(first: 100, after: $after, orderBy: {field: STARRED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      edges {
+        starredAt
+        node {
+          nameWithOwner
+          description
+          url
+          primaryLanguage { name }
+          stargazerCount
+          repositoryTopics(first: 10) { nodes { topic { name } } }
+        }
+      }
+    }
+  }
+}
+"""
 
 
 def extract_stars(
     client: GitHubClient, base: Path, login: str, since: datetime,
-    per_page: int = 100,
 ) -> list[dict]:
+    """GraphQL viewer.starredRepositories로 starred repos를 수집한다."""
     typer.echo("→  Extracting starred repositories…")
 
     by_month: dict[str, list[dict]] = defaultdict(list)
     all_stars: list[dict] = []
-    page = 1
-    star_headers = {"Accept": "application/vnd.github.star+json"}
+    cursor: Optional[str] = None
 
     while True:
-        data = client.rest(
-            f"/users/{login}/starred",
-            headers=star_headers,
-            per_page=per_page,
-            page=page,
-        )
+        variables: dict[str, Any] = {}
+        if cursor:
+            variables["after"] = cursor
 
-        if not isinstance(data, list) or not data:
+        data = client.graphql(_STARS_QUERY, variables)
+        if not data:
             break
 
+        starred = data["viewer"]["starredRepositories"]
+        edges = starred["edges"]
+
         reached_cutoff = False
-        for item in data:
-            starred_at_str = item.get("starred_at", "")
-            if not starred_at_str:
-                continue
+        for edge in edges:
+            starred_at_str = edge["starredAt"]
             starred_at = _iso_to_dt(starred_at_str)
 
             if starred_at < since:
                 reached_cutoff = True
                 break
 
-            starred_repo = item.get("repo", {})
-            topics = starred_repo.get("topics", [])
+            node = edge["node"]
+            lang = (node.get("primaryLanguage") or {}).get("name", "")
+            topics = [t["topic"]["name"] for t in (node.get("repositoryTopics") or {}).get("nodes", [])]
+
             entry = {
                 "starred_at": starred_at_str,
-                "name": starred_repo.get("full_name", ""),
-                "description": (starred_repo.get("description") or "").strip(),
-                "url": starred_repo.get("html_url", ""),
-                "language": starred_repo.get("language") or "",
+                "name": node.get("nameWithOwner", ""),
+                "description": (node.get("description") or "").strip(),
+                "url": node.get("url", ""),
+                "language": lang,
                 "topics": topics,
-                "stars": starred_repo.get("stargazers_count", 0),
+                "stars": node.get("stargazerCount", 0),
             }
             month = entry["starred_at"][:7]
             by_month[month].append(entry)
             all_stars.append(entry)
 
-        if reached_cutoff or len(data) < per_page:
+        if reached_cutoff or not starred["pageInfo"]["hasNextPage"]:
             break
-        page += 1
+        cursor = starred["pageInfo"]["endCursor"]
         time.sleep(client.rate_limit_delay)
 
     for month, entries in sorted(by_month.items()):
@@ -466,6 +633,7 @@ def extract_stars(
             lines.append(f"### [{e['name']}]({e['url']})")
             lines.append(f"- **Starred:** {e['starred_at'][:10]}")
             lines.append(f"- **Language:** {e['language']}")
+            lines.append(f"- **Stars:** {e.get('stars', 0):,}")
             if e["description"]:
                 lines.append(f"- **Description:** {e['description']}")
             if topic_str:
@@ -478,7 +646,224 @@ def extract_stars(
 
 
 # ---------------------------------------------------------------------------
-# 6. Projects
+# 6. Issues
+# ---------------------------------------------------------------------------
+
+_ISSUE_QUERY = """
+query($login: String!, $after: String) {
+  user(login: $login) {
+    issues(
+      first: 50
+      after: $after
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        state
+        createdAt
+        closedAt
+        url
+        body
+        repository { nameWithOwner }
+        labels(first: 10) { nodes { name } }
+        comments(first: 10) {
+          nodes {
+            body
+            createdAt
+            author { login }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def extract_issues(
+    client: GitHubClient, base: Path, login: str, since: datetime
+) -> list[dict]:
+    """사용자가 생성한 이슈를 월별 MD 파일로 수집한다."""
+    typer.echo("→  Extracting issues…")
+    cursor: Optional[str] = None
+    issues: list[dict] = []
+    page = 0
+
+    while True:
+        variables: dict[str, Any] = {"login": login}
+        if cursor:
+            variables["after"] = cursor
+
+        data = client.graphql(_ISSUE_QUERY, variables)
+        if not data:
+            break
+
+        page_data = data["user"]["issues"]
+        nodes = page_data["nodes"]
+
+        reached_cutoff = False
+        for node in nodes:
+            created = _iso_to_dt(node["createdAt"])
+            if created < since:
+                reached_cutoff = True
+                break
+            issues.append(node)
+
+        page += 1
+        typer.echo(f"   page {page}: {len(issues)} issues so far")
+
+        if reached_cutoff or not page_data["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page_data["pageInfo"]["endCursor"]
+        time.sleep(client.rate_limit_delay)
+
+    # 월별 그룹핑
+    by_month: dict[str, list[dict]] = defaultdict(list)
+    for issue in issues:
+        month = issue["createdAt"][:7]
+        by_month[month].append(issue)
+
+    for month, entries in sorted(by_month.items()):
+        frontmatter: dict[str, Any] = {
+            "period": month,
+            "category": "issues",
+            "total": len(entries),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lines = [f"## Issues — {month}", ""]
+        for e in sorted(entries, key=lambda x: x["createdAt"]):
+            labels = [l["name"] for l in e.get("labels", {}).get("nodes", [])]
+            label_str = f" [{', '.join(labels)}]" if labels else ""
+            repo = e["repository"]["nameWithOwner"]
+            lines.append(f"### #{e['number']}: {e['title']}{label_str}")
+            lines.append(f"- **Repo:** {repo}")
+            lines.append(f"- **State:** {e['state']}")
+            lines.append(f"- **Created:** {e['createdAt'][:10]}")
+            if e.get("closedAt"):
+                lines.append(f"- **Closed:** {e['closedAt'][:10]}")
+            if e.get("body", "").strip():
+                lines.append(f"\n{e['body'].strip()[:300]}")
+
+            comments = e.get("comments", {}).get("nodes", [])
+            if comments:
+                lines.append("")
+                lines.append("**Comments:**")
+                for c in comments:
+                    author = (c.get("author") or {}).get("login", "unknown")
+                    lines.append(f"- **{author}** ({c['createdAt'][:10]}): {c['body'].strip()[:200]}")
+            lines.append("")
+
+        write_md(base / "issues" / f"{month}.md", frontmatter, "\n".join(lines))
+
+    typer.echo(f"✓  Issues: {len(issues)} issues across {len(by_month)} months")
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# 7. Code Reviews (as reviewer)
+# ---------------------------------------------------------------------------
+
+_REVIEW_CONTRIBUTIONS_QUERY = """
+query($login: String!, $from: DateTime!, $to: DateTime!, $after: String) {
+  user(login: $login) {
+    contributionsCollection(from: $from, to: $to) {
+      pullRequestReviewContributions(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          occurredAt
+          pullRequestReview {
+            state
+            createdAt
+            body
+            pullRequest {
+              title
+              number
+              url
+              repository { nameWithOwner }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def extract_reviews(
+    client: GitHubClient, base: Path, login: str, since: datetime
+) -> list[dict]:
+    """다른 사람 PR에 남긴 코드 리뷰를 월별 MD 파일로 수집한다."""
+    typer.echo("→  Extracting code reviews…")
+    cursor: Optional[str] = None
+    reviews: list[dict] = []
+    now = datetime.now(timezone.utc)
+
+    while True:
+        variables: dict[str, Any] = {
+            "login": login,
+            "from": since.isoformat(),
+            "to": now.isoformat(),
+        }
+        if cursor:
+            variables["after"] = cursor
+
+        data = client.graphql(_REVIEW_CONTRIBUTIONS_QUERY, variables)
+        if not data:
+            break
+
+        contributions = data["user"]["contributionsCollection"]["pullRequestReviewContributions"]
+        nodes = contributions["nodes"]
+
+        for node in nodes:
+            occurred = _iso_to_dt(node["occurredAt"])
+            if occurred < since:
+                continue
+            review = node["pullRequestReview"]
+            pr = review["pullRequest"]
+            reviews.append({
+                "date": node["occurredAt"],
+                "state": review["state"],
+                "body": review.get("body", ""),
+                "pr_title": pr["title"],
+                "pr_number": pr["number"],
+                "pr_url": pr["url"],
+                "repository": pr["repository"]["nameWithOwner"],
+            })
+
+        if not contributions["pageInfo"]["hasNextPage"]:
+            break
+        cursor = contributions["pageInfo"]["endCursor"]
+        time.sleep(client.rate_limit_delay)
+
+    # 월별 그룹핑
+    by_month: dict[str, list[dict]] = defaultdict(list)
+    for r in reviews:
+        month = r["date"][:7]
+        by_month[month].append(r)
+
+    for month, entries in sorted(by_month.items()):
+        frontmatter: dict[str, Any] = {
+            "period": month,
+            "category": "reviews",
+            "total": len(entries),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lines = [f"## Code Reviews — {month}", ""]
+        for e in sorted(entries, key=lambda x: x["date"]):
+            lines.append(f"- `{e['date'][:10]}` **{e['repository']}** PR #{e['pr_number']}: {e['pr_title']} [{e['state']}]")
+            if e.get("body", "").strip():
+                lines.append(f"  > {e['body'].strip()[:200]}")
+        write_md(base / "reviews" / f"{month}.md", frontmatter, "\n".join(lines))
+
+    typer.echo(f"✓  Code Reviews: {len(reviews)} reviews across {len(by_month)} months")
+    return reviews
+
+
+# ---------------------------------------------------------------------------
+# 8. Projects
 # ---------------------------------------------------------------------------
 
 _PROJECT_QUERY = """

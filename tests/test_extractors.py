@@ -8,11 +8,14 @@ import pytest
 from acta.client import GitHubClient
 from acta.extractors import (
     extract_commits,
+    extract_contributed_repos,
+    extract_issues,
     extract_organizations,
     extract_projects,
     extract_pull_requests,
     extract_readmes,
     extract_repositories,
+    extract_reviews,
     extract_stars,
 )
 
@@ -39,7 +42,14 @@ class FakeGitHubClient(GitHubClient):
             resp = self._rest_sequence[self._rest_call_index]
             self._rest_call_index += 1
             return resp
-        return self._rest_responses.get(endpoint)
+        # 정확한 키 매칭
+        if endpoint in self._rest_responses:
+            return self._rest_responses[endpoint]
+        # 접두사 매칭 (e.g. "/repos/user/" → 모든 /repos/user/* 매칭)
+        for key, val in self._rest_responses.items():
+            if key.endswith("*") and endpoint.startswith(key[:-1]):
+                return val
+        return None
 
     def graphql(self, query: str, variables: dict) -> dict | None:
         if self._graphql_call_index < len(self._graphql_responses):
@@ -98,6 +108,32 @@ class TestExtractRepositories:
 
         content = (tmp_path / "repositories" / "repo-a.md").read_text()
         assert "name: repo-a" in content
+        # rich body 검증
+        assert "**Language**:" in content
+        assert "**Stars**:" in content
+        assert "Description of repo-a" in content
+
+    def test_includes_language_breakdown(self, tmp_path: Path):
+        """repositories/*.md frontmatter에 언어 비율이 포함된다."""
+        nodes = [_make_repo_node("my-repo")]
+        client = FakeGitHubClient(
+            graphql_responses=[
+                {"user": {"repositories": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": nodes,
+                }}}
+            ],
+            rest_responses={
+                "/repos/user/my-repo/languages": {"Python": 50000, "JavaScript": 30000, "Shell": 5000},
+            },
+        )
+
+        repos = extract_repositories(client, tmp_path, "user", SINCE)
+
+        content = (tmp_path / "repositories" / "my-repo.md").read_text()
+        assert "Python:" in content
+        assert "58" in content  # 58.8%
+        assert "JavaScript:" in content
 
     def test_handles_pagination(self, tmp_path: Path):
         """여러 페이지를 순회하여 모든 레포를 가져온다."""
@@ -113,6 +149,49 @@ class TestExtractRepositories:
 
         repos = extract_repositories(client, tmp_path, "user", SINCE)
         assert len(repos) == 2
+
+
+# ---------------------------------------------------------------------------
+# extract_contributed_repos
+# ---------------------------------------------------------------------------
+
+
+class TestExtractContributedRepos:
+    def test_fetches_collaborator_repos(self, tmp_path: Path):
+        """COLLABORATOR/ORG_MEMBER affiliation 레포를 반환한다."""
+        nodes = [_make_repo_node("org-project", language="TypeScript")]
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"repositories": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": nodes,
+            }}}
+        ])
+
+        repos = extract_contributed_repos(client, tmp_path, "user", SINCE, exclude_names=set())
+
+        assert len(repos) == 1
+        assert repos[0]["name"] == "org-project"
+        assert (tmp_path / "repositories" / "org-project.md").exists()
+
+    def test_excludes_already_owned_repos(self, tmp_path: Path):
+        """이미 OWNER로 수집된 레포를 중복 제외한다."""
+        nodes = [
+            _make_repo_node("my-repo"),
+            _make_repo_node("org-only"),
+        ]
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"repositories": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": nodes,
+            }}}
+        ])
+
+        repos = extract_contributed_repos(
+            client, tmp_path, "user", SINCE, exclude_names={"my-repo"}
+        )
+
+        assert len(repos) == 1
+        assert repos[0]["name"] == "org-only"
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +234,45 @@ class TestExtractCommits:
         assert md_path.exists()
         content = md_path.read_text()
         assert "abc1234" in content
+
+    def test_includes_additions_deletions(self, tmp_path: Path):
+        """커밋에 additions/deletions가 포함되고 월별 MD에 합산 표시된다."""
+        repos = [_make_repo_node("my-repo")]
+        commit_nodes = [
+            {
+                "oid": "aaa1111111111",
+                "message": "feat: add feature",
+                "committedDate": "2025-02-10T10:00:00Z",
+                "additions": 150,
+                "deletions": 30,
+                "author": {"name": "User", "email": "u@e.com", "user": {"login": "testuser"}},
+            },
+            {
+                "oid": "bbb2222222222",
+                "message": "fix: bug",
+                "committedDate": "2025-02-15T10:00:00Z",
+                "additions": 10,
+                "deletions": 5,
+                "author": {"name": "User", "email": "u@e.com", "user": {"login": "testuser"}},
+            },
+        ]
+        client = FakeGitHubClient(graphql_responses=[
+            {"repository": {"defaultBranchRef": {"target": {"history": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": commit_nodes,
+            }}}}}
+        ])
+
+        commits = extract_commits(client, tmp_path, "testuser", repos, SINCE)
+
+        assert commits[0]["additions"] == 150
+        assert commits[0]["deletions"] == 30
+        assert commits[1]["additions"] == 10
+
+        md_path = tmp_path / "commits" / "2025-02.md"
+        content = md_path.read_text()
+        assert "+160" in content  # 150 + 10
+        assert "-35" in content   # 30 + 5
 
     def test_skips_forks(self, tmp_path: Path):
         """fork 레포는 건너뛴다."""
@@ -274,35 +392,34 @@ class TestExtractReadmes:
 # ---------------------------------------------------------------------------
 
 
+def _make_star_edge(name: str, date: str, language: str = "Python", desc: str = ""):
+    """GraphQL starredRepositories edge 헬퍼."""
+    return {
+        "starredAt": date,
+        "node": {
+            "nameWithOwner": name,
+            "description": desc or f"Desc of {name}",
+            "url": f"https://github.com/{name}",
+            "primaryLanguage": {"name": language} if language else None,
+            "stargazerCount": 10,
+            "repositoryTopics": {"nodes": []},
+        },
+    }
+
+
 class TestExtractStars:
     def test_groups_by_month(self, tmp_path: Path):
         """starred repos를 월별로 그룹핑한다."""
-        client = FakeGitHubClient(rest_responses={
-            "/users/user/starred": [
-                {
-                    "starred_at": "2025-02-15T00:00:00Z",
-                    "repo": {
-                        "full_name": "cool/lib",
-                        "description": "A cool library",
-                        "html_url": "https://github.com/cool/lib",
-                        "language": "Rust",
-                        "topics": ["cli"],
-                        "stargazers_count": 100,
-                    },
-                },
-                {
-                    "starred_at": "2025-01-10T00:00:00Z",
-                    "repo": {
-                        "full_name": "nice/tool",
-                        "description": "A nice tool",
-                        "html_url": "https://github.com/nice/tool",
-                        "language": "Go",
-                        "topics": [],
-                        "stargazers_count": 50,
-                    },
-                },
-            ],
-        })
+        edges = [
+            _make_star_edge("cool/lib", "2025-02-15T00:00:00Z", "Rust"),
+            _make_star_edge("nice/tool", "2025-01-10T00:00:00Z", "Go"),
+        ]
+        client = FakeGitHubClient(graphql_responses=[
+            {"viewer": {"starredRepositories": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "edges": edges,
+            }}}
+        ])
 
         stars = extract_stars(client, tmp_path, "user", SINCE)
 
@@ -310,40 +427,26 @@ class TestExtractStars:
         assert (tmp_path / "stars" / "2025-02.md").exists()
         assert (tmp_path / "stars" / "2025-01.md").exists()
 
-    def test_skips_entries_without_timestamp(self, tmp_path: Path):
-        """starred_at이 없는 항목은 건너뛴다."""
-        client = FakeGitHubClient(rest_responses={
-            "/users/user/starred": [
-                {"starred_at": "", "repo": {"full_name": "x/y"}},
-            ],
-        })
-
-        stars = extract_stars(client, tmp_path, "user", SINCE)
-        assert len(stars) == 0
+        # 상세 정보 검증
+        content = (tmp_path / "stars" / "2025-02.md").read_text()
+        assert "cool/lib" in content
+        assert "Rust" in content
+        assert "Stars:" in content
+        assert "Desc of cool/lib" in content
 
     def test_paginates_multiple_pages(self, tmp_path: Path):
         """여러 페이지를 순회하여 모든 starred repos를 수집한다."""
-        def _star(name: str, date: str):
-            return {
-                "starred_at": date,
-                "repo": {
-                    "full_name": name,
-                    "description": f"Desc of {name}",
-                    "html_url": f"https://github.com/{name}",
-                    "language": "Python",
-                    "topics": [],
-                    "stargazers_count": 10,
-                },
-            }
+        page1 = {"viewer": {"starredRepositories": {
+            "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+            "edges": [_make_star_edge("a/repo1", "2025-03-01T00:00:00Z")],
+        }}}
+        page2 = {"viewer": {"starredRepositories": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "edges": [_make_star_edge("b/repo2", "2025-02-01T00:00:00Z")],
+        }}}
+        client = FakeGitHubClient(graphql_responses=[page1, page2])
 
-        # 페이지 1: per_page개 (꽉 참 → 다음 페이지 있음)
-        # 페이지 2: per_page 미만 (마지막 페이지)
-        page1 = [_star("a/repo1", "2025-03-01T00:00:00Z")]
-        page2 = [_star("b/repo2", "2025-02-01T00:00:00Z")]
-
-        client = FakeGitHubClient(rest_sequence=[page1, page2])
-
-        stars = extract_stars(client, tmp_path, "user", SINCE, per_page=1)
+        stars = extract_stars(client, tmp_path, "user", SINCE)
 
         assert len(stars) == 2
         assert stars[0]["name"] == "a/repo1"
@@ -351,23 +454,196 @@ class TestExtractStars:
 
     def test_stops_pagination_at_since_cutoff(self, tmp_path: Path):
         """since 이전의 star를 만나면 페이지네이션을 중단한다."""
-        page1 = [
-            {
-                "starred_at": "2025-03-01T00:00:00Z",
-                "repo": {"full_name": "new/repo", "description": "", "html_url": "", "language": "Go", "topics": [], "stargazers_count": 5},
-            },
-            {
-                "starred_at": "2024-06-01T00:00:00Z",  # since(2025-01-01) 이전
-                "repo": {"full_name": "old/repo", "description": "", "html_url": "", "language": "Go", "topics": [], "stargazers_count": 5},
-            },
+        edges = [
+            _make_star_edge("new/repo", "2025-03-01T00:00:00Z"),
+            _make_star_edge("old/repo", "2024-06-01T00:00:00Z"),
         ]
-
-        client = FakeGitHubClient(rest_sequence=[page1])
+        client = FakeGitHubClient(graphql_responses=[
+            {"viewer": {"starredRepositories": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "edges": edges,
+            }}}
+        ])
 
         stars = extract_stars(client, tmp_path, "user", SINCE)
 
         assert len(stars) == 1
         assert stars[0]["name"] == "new/repo"
+
+
+# ---------------------------------------------------------------------------
+# extract_issues
+# ---------------------------------------------------------------------------
+
+
+class TestExtractIssues:
+    def test_writes_issue_files_grouped_by_month(self, tmp_path: Path):
+        """이슈를 월별 MD 파일로 그룹핑하여 생성한다."""
+        issue_nodes = [
+            {
+                "number": 10,
+                "title": "Bug report",
+                "state": "OPEN",
+                "createdAt": "2025-02-15T00:00:00Z",
+                "closedAt": None,
+                "url": "https://github.com/user/repo/issues/10",
+                "body": "Something is broken",
+                "repository": {"nameWithOwner": "user/repo"},
+                "labels": {"nodes": [{"name": "bug"}]},
+                "comments": {"nodes": []},
+            },
+            {
+                "number": 11,
+                "title": "Feature request",
+                "state": "CLOSED",
+                "createdAt": "2025-01-05T00:00:00Z",
+                "closedAt": "2025-01-20T00:00:00Z",
+                "url": "https://github.com/user/repo/issues/11",
+                "body": "Please add X",
+                "repository": {"nameWithOwner": "user/repo"},
+                "labels": {"nodes": [{"name": "enhancement"}]},
+                "comments": {"nodes": []},
+            },
+        ]
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"issues": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": issue_nodes,
+            }}}
+        ])
+
+        issues = extract_issues(client, tmp_path, "user", SINCE)
+
+        assert len(issues) == 2
+        assert (tmp_path / "issues" / "2025-02.md").exists()
+        assert (tmp_path / "issues" / "2025-01.md").exists()
+
+        content = (tmp_path / "issues" / "2025-02.md").read_text()
+        assert "Bug report" in content
+        assert "bug" in content
+
+    def test_stops_at_since_cutoff(self, tmp_path: Path):
+        """since 이전의 이슈는 수집하지 않는다."""
+        old_issue = {
+            "number": 1,
+            "title": "Old issue",
+            "state": "CLOSED",
+            "createdAt": "2024-06-01T00:00:00Z",
+            "closedAt": "2024-06-02T00:00:00Z",
+            "url": "https://github.com/user/repo/issues/1",
+            "body": "",
+            "repository": {"nameWithOwner": "user/repo"},
+            "labels": {"nodes": []},
+            "comments": {"nodes": []},
+        }
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"issues": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [old_issue],
+            }}}
+        ])
+
+        issues = extract_issues(client, tmp_path, "user", SINCE)
+        assert len(issues) == 0
+
+    def test_includes_comments_in_body(self, tmp_path: Path):
+        """이슈 코멘트가 MD body에 포함된다."""
+        issue = {
+            "number": 5,
+            "title": "Discussion",
+            "state": "OPEN",
+            "createdAt": "2025-03-01T00:00:00Z",
+            "closedAt": None,
+            "url": "https://github.com/user/repo/issues/5",
+            "body": "Main topic",
+            "repository": {"nameWithOwner": "user/repo"},
+            "labels": {"nodes": []},
+            "comments": {"nodes": [
+                {"body": "I agree", "createdAt": "2025-03-02T00:00:00Z", "author": {"login": "commenter"}},
+            ]},
+        }
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"issues": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [issue],
+            }}}
+        ])
+
+        issues = extract_issues(client, tmp_path, "user", SINCE)
+
+        content = (tmp_path / "issues" / "2025-03.md").read_text()
+        assert "I agree" in content
+        assert "commenter" in content
+
+
+# ---------------------------------------------------------------------------
+# extract_reviews
+# ---------------------------------------------------------------------------
+
+
+class TestExtractReviews:
+    def test_writes_review_files_grouped_by_month(self, tmp_path: Path):
+        """리뷰 활동을 월별 MD 파일로 그룹핑한다."""
+        review_nodes = [
+            {
+                "occurredAt": "2025-02-10T00:00:00Z",
+                "pullRequestReview": {
+                    "state": "APPROVED",
+                    "createdAt": "2025-02-10T00:00:00Z",
+                    "body": "LGTM",
+                    "pullRequest": {
+                        "title": "Add feature X",
+                        "number": 42,
+                        "url": "https://github.com/other/repo/pull/42",
+                        "repository": {"nameWithOwner": "other/repo"},
+                    },
+                },
+            },
+        ]
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"contributionsCollection": {
+                "pullRequestReviewContributions": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": review_nodes,
+                },
+            }}}
+        ])
+
+        reviews = extract_reviews(client, tmp_path, "user", SINCE)
+
+        assert len(reviews) == 1
+        assert (tmp_path / "reviews" / "2025-02.md").exists()
+        content = (tmp_path / "reviews" / "2025-02.md").read_text()
+        assert "Add feature X" in content
+        assert "APPROVED" in content
+
+    def test_stops_at_since_cutoff(self, tmp_path: Path):
+        """since 이전의 리뷰는 수집하지 않는다."""
+        old_review = {
+            "occurredAt": "2024-06-01T00:00:00Z",
+            "pullRequestReview": {
+                "state": "COMMENTED",
+                "createdAt": "2024-06-01T00:00:00Z",
+                "body": "old",
+                "pullRequest": {
+                    "title": "Old PR",
+                    "number": 1,
+                    "url": "https://github.com/other/repo/pull/1",
+                    "repository": {"nameWithOwner": "other/repo"},
+                },
+            },
+        }
+        client = FakeGitHubClient(graphql_responses=[
+            {"user": {"contributionsCollection": {
+                "pullRequestReviewContributions": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [old_review],
+                },
+            }}}
+        ])
+
+        reviews = extract_reviews(client, tmp_path, "user", SINCE)
+        assert len(reviews) == 0
 
 
 # ---------------------------------------------------------------------------
