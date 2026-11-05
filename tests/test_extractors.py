@@ -2,10 +2,11 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from acta.client import GitHubClient
+from acta.client import GitHubClient, GitHubAPIError
 from acta.extractors import (
     extract_commits,
     extract_contributed_repos,
@@ -52,7 +53,7 @@ class FakeGitHubClient(GitHubClient):
         for key, val in self._rest_responses.items():
             if key.endswith("*") and endpoint.startswith(key[:-1]):
                 return val
-        return None
+        return {} if endpoint.endswith("/languages") else None
 
     def graphql(self, query: str, variables: dict) -> dict | None:
         if self._graphql_call_index < len(self._graphql_responses):
@@ -106,10 +107,10 @@ class TestExtractRepositories:
         repos = extract_repositories(client, tmp_path, "user", SINCE)
 
         assert len(repos) == 2
-        assert (tmp_path / "repositories" / "repo-a.md").exists()
-        assert (tmp_path / "repositories" / "repo-b.md").exists()
+        assert (tmp_path / "repositories" / "user__repo-a.md").exists()
+        assert (tmp_path / "repositories" / "user__repo-b.md").exists()
 
-        content = (tmp_path / "repositories" / "repo-a.md").read_text()
+        content = (tmp_path / "repositories" / "user__repo-a.md").read_text()
         assert "name: repo-a" in content
         # rich body 검증
         assert "**Language**:" in content
@@ -133,7 +134,7 @@ class TestExtractRepositories:
 
         repos = extract_repositories(client, tmp_path, "user", SINCE)
 
-        content = (tmp_path / "repositories" / "my-repo.md").read_text()
+        content = (tmp_path / "repositories" / "user__my-repo.md").read_text()
         assert "Python:" in content
         assert "58" in content  # 58.8%
         assert "JavaScript:" in content
@@ -174,7 +175,7 @@ class TestExtractContributedRepos:
 
         assert len(repos) == 1
         assert repos[0]["name"] == "org-project"
-        assert (tmp_path / "repositories" / "org-project.md").exists()
+        assert (tmp_path / "repositories" / "user__org-project.md").exists()
 
     def test_excludes_already_owned_repos(self, tmp_path: Path):
         """이미 OWNER로 수집된 레포를 중복 제외한다."""
@@ -190,7 +191,7 @@ class TestExtractContributedRepos:
         ])
 
         repos = extract_contributed_repos(
-            client, tmp_path, "user", SINCE, exclude_names={"my-repo"}
+            client, tmp_path, "user", SINCE, exclude_names={"user/my-repo"}
         )
 
         assert len(repos) == 1
@@ -371,7 +372,7 @@ class TestExtractReadmes:
         count = extract_readmes(client, tmp_path, "user", repos)
 
         assert count == 1
-        md_path = tmp_path / "readmes" / "my-repo_readme.md"
+        md_path = tmp_path / "readmes" / "user__my-repo_readme.md"
         assert md_path.exists()
         content = md_path.read_text()
         assert "# My Project" in content
@@ -585,6 +586,12 @@ class TestExtractIssues:
 
 
 class TestExtractReviews:
+    @pytest.fixture(autouse=True)
+    def fixed_clock(self):
+        with patch("acta.extractors.datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime(2025, 3, 1, tzinfo=timezone.utc)
+            yield
+
     def test_writes_review_files_grouped_by_month(self, tmp_path: Path):
         """리뷰 활동을 월별 MD 파일로 그룹핑한다."""
         review_nodes = [
@@ -745,13 +752,12 @@ class TestExtractProfile:
         assert "LINKEDIN" in content
         assert "Working on Acta" in content
 
-    def test_handles_empty_profile(self, tmp_path: Path):
-        """API 실패 시 빈 dict를 반환한다."""
+    def test_failed_profile_is_not_an_empty_collection(self, tmp_path: Path):
+        """A failed profile request must abort publication."""
         client = FakeGitHubClient(graphql_responses=[None])
 
-        profile = extract_profile(client, tmp_path, "testuser")
-
-        assert profile == {}
+        with pytest.raises(GitHubAPIError):
+            extract_profile(client, tmp_path, "testuser")
 
 
 # ---------------------------------------------------------------------------
@@ -892,10 +898,9 @@ class TestExtractContributionCalendar:
         assert stats["max_streak"] == 3
         assert stats["current_streak"] == 3
 
-    def test_handles_empty_calendar(self, tmp_path: Path):
-        """API 실패 시 빈 dict를 반환한다."""
+    def test_failed_calendar_is_not_an_empty_collection(self, tmp_path: Path):
+        """A failed calendar request must abort publication."""
         client = FakeGitHubClient(graphql_responses=[None])
 
-        stats = extract_contribution_calendar(client, tmp_path, "testuser", SINCE)
-
-        assert stats == {}
+        with pytest.raises(GitHubAPIError):
+            extract_contribution_calendar(client, tmp_path, "testuser", SINCE)

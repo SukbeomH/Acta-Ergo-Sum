@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import glob
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
 
 
-def load_template(path: Path) -> tuple[dict[str, Any], str]:
+def load_template(path: Traversable) -> tuple[dict[str, Any], str]:
     """YAML frontmatter + 프롬프트 본문을 파싱한다."""
     content = path.read_text(encoding="utf-8")
     if not content.startswith("---"):
@@ -93,11 +94,14 @@ def build_prompt(
     return template_body.replace("{{context}}", context_str)
 
 
-def list_templates(templates_dir: Path) -> list[str]:
+def list_templates(templates_dir: Traversable) -> list[str]:
     """templates 디렉토리의 .md 파일 이름 목록을 반환한다."""
     if not templates_dir.is_dir():
         return []
-    return sorted(p.stem for p in templates_dir.glob("*.md"))
+    return sorted(
+        p.name.removesuffix(".md") for p in templates_dir.iterdir()
+        if p.is_file() and p.name.endswith(".md")
+    )
 
 
 def call_api(prompt: str, max_tokens: int = 4096, model: str = "claude-sonnet-4-20250514") -> str:

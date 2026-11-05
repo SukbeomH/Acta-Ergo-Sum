@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp[cli]>=1.0.0"]
+mcp = ["mcp[cli]>=1.30,<2"]
 
 [project.urls]
 Homepage = "https://github.com/SukbeomH/Acta-Ergo-Sum"

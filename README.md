@@ -7,10 +7,11 @@
 GitHub 활동 데이터를 LLM 친화적 **Markdown 지식 베이스**로 수집하고,
 특정 레포지토리를 딥 분석하여 프로젝트의 구조/기술 스택/설계 의도를 추출하는 CLI 도구.
 
-**두 가지 모드:**
+**주요 명령:**
 - `acta run` — 내 GitHub 활동 전체를 수집 (이력서/포트폴리오용)
 - `acta deep` — 특정 레포를 분석하여 LLM이 프로젝트를 이해할 수 있는 컨텍스트 생성
 - `acta mcp` — MCP 서버로 LLM 에이전트에게 도구를 직접 노출
+- `acta analyze` — 수집한 자료와 기본·사용자 템플릿을 결합해 분석 프롬프트 생성
 
 ---
 
@@ -127,6 +128,22 @@ uv run python app.py run --days 30 --skip-readmes --skip-stars
 uv run python app.py whoami
 ```
 
+수집한 커밋·PR·이슈·리뷰·스타는 `.records/`의 원본 기록을 고유키로 병합합니다.
+반복 실행해도 이전 기록을 유지하며 `SUMMARY.md`, `timeline.csv`, 월별 파일은 누적 기록에서 생성합니다.
+`--days` 등은 이번에 조회할 기간을 지정합니다. 별도의 기간별 자료가 필요하면 새 전용 `--output` 디렉터리를 사용하세요.
+작업 디렉터리 자체나 상위 디렉터리는 출력 대상으로 사용할 수 없습니다.
+
+```bash
+# 성공한 단계별 기준 시각부터 증분 갱신
+uv run python app.py run --since-last-run
+```
+
+기준 시각은 실행 시작 시점으로 기록합니다. 건너뛴 활동 단계는 기존 기록과 기준 시각을 유지합니다.
+API 오류나 시간 초과가 발생하면 종료 코드 1을 반환하고 이전 출력과 기준 시각을 보존합니다.
+기존 Markdown 출력에 원본 캐시가 없으면 원래 수집 기간을 한 번 다시 조회합니다.
+이 이관이 필요한 활동 단계는 처음 한 번 `--skip-*` 없이 실행해야 합니다.
+저장소와 README 파일명은 소유자를 포함한 `owner__repo.md`, `owner__repo_readme.md` 형식입니다.
+
 ### 레포 딥 분석 (`deep`)
 
 ```bash
@@ -147,6 +164,8 @@ uv run python app.py deep owner/repo --include-me
 uv run python app.py mcp
 ```
 
+MCP 추가 의존성은 SDK 1.x(`>=1.30,<2`)를 사용합니다. stdio 연결에서 진행 로그는 stderr로 출력합니다.
+
 MCP로 노출되는 도구:
 
 | Tool | 용도 |
@@ -156,12 +175,12 @@ MCP로 노출되는 도구:
 | `get_repo_key_files` | 핵심 설정 파일 내용 (manifest, CI, docs 등) |
 | `get_repo_evolution` | 릴리스 + 커밋 + CHANGELOG |
 
-### Options
+### 활동 수집 옵션
 
 | Flag | Default | Description |
 |---|---|---|
 | `--days`, `-d` | `365` | 수집 기간 (일) |
-| `--months`, `-m` | `0` | 수집 기간 (월, --days 우선) |
+| `--months`, `-m` | `0` | 수집 기간 (월, --days보다 우선) |
 | `--years`, `-y` | `0` | 수집 기간 (년) |
 | `--output`, `-o` | `./acta_data` | 출력 디렉토리 |
 | `--skip-readmes` | `false` | README 수집 건너뛰기 |
@@ -171,9 +190,22 @@ MCP로 노출되는 도구:
 | `--skip-reviews` | `false` | 리뷰 수집 건너뛰기 |
 | `--skip-stars` | `false` | 스타 수집 건너뛰기 |
 | `--skip-contributed` | `false` | 기여 레포 수집 건너뛰기 |
-| `--since-last-run` | `false` | 마지막 실행 이후만 수집 |
+| `--since-last-run` | `false` | 단계별 마지막 성공 시점부터 갱신하고 기존 기록과 병합 |
 
 ---
+
+### 분석 프롬프트 생성 (`analyze`)
+
+```bash
+# 설치된 기본 템플릿 사용 — 현재 디렉터리와 무관
+uv run python app.py analyze -t profile -i ./acta_data
+
+# 사용자 템플릿 디렉터리 지정
+uv run python app.py analyze -t profile -i ./acta_data --template-dir ./my_templates
+```
+
+기본 템플릿 `profile`, `resume`, `weekly`, `project-summary`는 `acta/templates/`에 포함되며 wheel에도 함께 설치됩니다.
+생성된 프롬프트는 입력 디렉터리의 `analysis/`에 저장합니다.
 
 ## Output Structure
 
@@ -181,10 +213,11 @@ MCP로 노출되는 도구:
 
 ```text
 acta_data/
+├── .records/              # 누적 활동 원본 JSON — 증분 실행 시 유지
 ├── profile.md             # 사용자 프로필 (bio, location, social)
 ├── pinned.md              # 핀된 레포 (포트폴리오 하이라이트)
 ├── contributions.md       # 잔디 데이터 (streak, 월별/요일별 집계)
-├── repositories/          # 레포별 .md (owned + contributed)
+├── repositories/          # owner__repo.md (owned + contributed)
 ├── commits/               # YYYY-MM.md — 월별 커밋
 ├── pull_requests/         # PR별 .md (리뷰, 상태, 설명)
 ├── issues/                # YYYY-MM.md — 월별 이슈
@@ -274,18 +307,15 @@ graph TD
 ## Testing
 
 ```bash
+uv sync --dev --extra mcp
 uv run pytest tests/ -v
+uv build
+uv run python scripts/check_wheel.py dist/*.whl
 ```
 
-| Test Module | Tests | Coverage |
-|---|---|---|
-| `test_client.py` | 9 | GitHubClient REST/GraphQL/auth |
-| `test_extractors.py` | 30 | 13 extractors via FakeClient |
-| `test_writers.py` | 10 | MD/JSON/CSV/Summary output |
-| `test_cli.py` | 6 | CLI end-to-end with CliRunner |
-| `test_deep.py` | 22 | Detector + Renderer |
-| `test_analyzer.py` | 6 | Template loading + prompt building |
-| **Total** | **83** | |
+CI는 Python 3.12와 3.13에서 수집 회귀 테스트와 전체 테스트를 실행합니다.
+wheel 검증은 소스 디렉터리 밖의 격리된 환경에서 기본·사용자 템플릿과 실제 MCP stdio 초기화·도구 조회·호출을 확인합니다.
+MCP 테스트의 GitHub 응답은 가짜 `gh` 실행 파일로 제공하므로 인증이나 네트워크가 필요하지 않습니다.
 
 ---
 

@@ -9,7 +9,8 @@ from pathlib import Path
 
 import typer
 
-from acta.client import GitHubClient
+from acta.client import GitHubClient, GitHubAPIError
+from acta.storage import load_records, staged_output
 from acta.extractors import (
     extract_commits,
     extract_contributed_repos,
@@ -23,6 +24,7 @@ from acta.extractors import (
     extract_readmes,
     extract_repositories,
     extract_reviews,
+    repository_name,
     extract_stars,
 )
 from acta.writers import generate_metadata, generate_summary, generate_timeline
@@ -86,20 +88,39 @@ def run(
 ) -> None:
     """Collect GitHub activity and write to a markdown knowledge base."""
     base = Path(output)
+    started_at = datetime.now(timezone.utc)
+    total_days = years * 365 if years else months * 30 if months else days
+    if total_days <= 0:
+        raise typer.BadParameter("Collection period must be positive.")
+    requested_since = started_at - timedelta(days=total_days)
+    meta_path = base / "metadata.json"
+    try:
+        previous = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+        if not isinstance(previous, dict):
+            raise ValueError("Expected a metadata object.")
+        previous_since = previous.get("collection_since")
+        if not previous_since and previous.get("generated_at"):
+            previous_since = (datetime.fromisoformat(previous["generated_at"].replace("Z", "+00:00"))
+                              - timedelta(days=previous.get("period_days", total_days))).isoformat()
+        collection_since = datetime.fromisoformat(previous_since) if previous_since else requested_since
+        if not since_last_run:
+            collection_since = min(collection_since, requested_since)
+        since = _read_last_run(meta_path, total_days) if since_last_run else requested_since
+    except (ValueError, TypeError) as exc:
+        typer.echo(f"✗  Invalid collection metadata: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
-    # 기간 우선순위: --since-last-run > --years > --months > --days
-    if since_last_run:
-        total_days = years * 365 + months * 30 + days if (years or months) else days
-        meta_path = base / "metadata.json"
-        since = _read_last_run(meta_path, total_days)
-    elif years:
-        since = datetime.now(timezone.utc) - timedelta(days=years * 365)
-    elif months:
-        since = datetime.now(timezone.utc) - timedelta(days=months * 30)
-    else:
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+    checkpoints = dict(previous.get("checkpoints", {}))
 
-    typer.echo(f"🚀  Acta Ergo Sum — collecting activity")
+    def stage_since(category: str) -> datetime:
+        if not since_last_run:
+            return requested_since
+        if not (base / ".records" / f"{category}.json").exists():
+            typer.echo(f"    Backfilling {category} from the original collection period.")
+            return collection_since
+        return datetime.fromisoformat(checkpoints.get(category, collection_since.isoformat()))
+
+    typer.echo("🚀  Acta Ergo Sum — collecting activity")
     typer.echo(f"    Output: {base.resolve()}")
     typer.echo(f"    Since:  {since.strftime('%Y-%m-%d')}\n")
 
@@ -109,72 +130,100 @@ def run(
         typer.echo("✗  `gh` CLI not found. Install from https://cli.github.com/", err=True)
         raise typer.Exit(code=1)
 
-    client = GitHubClient()
-    login = client.get_authenticated_user()
-    typer.echo(f"    User:   {login}\n")
+    try:
+        client = GitHubClient()
+        login = client.get_authenticated_user()
+        typer.echo(f"    User:   {login}\n")
 
-    _create_directories(base)
-    typer.echo("")
+        if previous.get("github_user", login).lower() != login.lower():
+            raise ValueError("Output belongs to a different GitHub user. Choose another --output directory.")
+        skipped = {"commits": skip_commits, "pull_requests": skip_prs, "issues": skip_issues,
+                   "reviews": skip_reviews, "stars": skip_stars}
+        for category, skip in skipped.items():
+            if skip and not (base / ".records" / f"{category}.json").exists():
+                if any((base / category).glob("*.md")):
+                    raise ValueError(f"Run once without --skip-* for {category} to backfill legacy records.")
+        with staged_output(base) as staging:
+            base = staging
+            _create_directories(base)
+            typer.echo("")
 
-    profile = extract_profile(client, base, login)
-    typer.echo("")
+            extract_profile(client, base, login)
+            typer.echo("")
 
-    pinned = extract_pinned_repos(client, base, login)
-    typer.echo("")
+            pinned = extract_pinned_repos(client, base, login)
+            typer.echo("")
 
-    calendar = extract_contribution_calendar(client, base, login, since)
-    typer.echo("")
+            calendar = extract_contribution_calendar(client, base, login, collection_since)
+            typer.echo("")
 
-    repos = extract_repositories(client, base, login, since)
-    typer.echo("")
+            repos = extract_repositories(client, base, login, since)
+            typer.echo("")
 
-    contributed: list[dict] = []
-    if not skip_contributed:
-        owner_names = {r["name"] for r in repos}
-        contributed = extract_contributed_repos(client, base, login, since, exclude_names=owner_names)
-        repos = repos + contributed
-        typer.echo("")
+            contributed: list[dict] = []
+            if not skip_contributed:
+                owner_names = {repository_name(r, login) for r in repos}
+                contributed = extract_contributed_repos(client, base, login, since, exclude_names=owner_names)
+                repos = repos + contributed
+                typer.echo("")
 
-    commits: list[dict] = []
-    if not skip_commits:
-        commits = extract_commits(client, base, login, repos, since)
-        typer.echo("")
+            commits = load_records(base, "commits")
+            if not skip_commits:
+                commits = extract_commits(client, base, login, repos, stage_since("commits"))
+                checkpoints["commits"] = started_at.isoformat()
+                typer.echo("")
 
-    prs: list[dict] = []
-    if not skip_prs:
-        prs = extract_pull_requests(client, base, login, since)
-        typer.echo("")
+            prs = load_records(base, "pull_requests")
+            if not skip_prs:
+                prs = extract_pull_requests(client, base, login, stage_since("pull_requests"))
+                checkpoints["pull_requests"] = started_at.isoformat()
+                typer.echo("")
 
-    issues: list[dict] = []
-    if not skip_issues:
-        issues = extract_issues(client, base, login, since)
-        typer.echo("")
+            issues = load_records(base, "issues")
+            if not skip_issues:
+                issues = extract_issues(client, base, login, stage_since("issues"))
+                checkpoints["issues"] = started_at.isoformat()
+                typer.echo("")
 
-    reviews: list[dict] = []
-    if not skip_reviews:
-        reviews = extract_reviews(client, base, login, since)
-        typer.echo("")
+            reviews = load_records(base, "reviews")
+            if not skip_reviews:
+                reviews = extract_reviews(client, base, login, stage_since("reviews"))
+                checkpoints["reviews"] = started_at.isoformat()
+                typer.echo("")
 
-    if not skip_readmes:
-        extract_readmes(client, base, login, repos)
-        typer.echo("")
+            if not skip_readmes:
+                extract_readmes(client, base, login, repos)
+                typer.echo("")
 
-    stars: list[dict] = []
-    if not skip_stars:
-        stars = extract_stars(client, base, login, since)
-        typer.echo("")
+            stars = load_records(base, "stars")
+            if not skip_stars:
+                stars = extract_stars(client, base, login, stage_since("stars"))
+                checkpoints["stars"] = started_at.isoformat()
+                typer.echo("")
 
-    projects = extract_projects(client, base, login)
-    typer.echo("")
+            projects = extract_projects(client, base, login)
+            typer.echo("")
 
-    orgs = extract_organizations(client, base, login)
-    typer.echo("")
+            orgs = extract_organizations(client, base, login)
+            typer.echo("")
 
-    generate_metadata(base, login, days, repos, commits, prs, stars, projects, orgs, SUBDIRS, issues=issues, reviews=reviews, pinned=pinned, calendar=calendar)
-    generate_timeline(base, commits, prs, stars, issues=issues, reviews=reviews)
-    generate_summary(base, login, days, repos, commits, prs, issues, reviews, stars, projects, orgs, pinned=pinned, calendar=calendar)
-    typer.echo("✓  SUMMARY.md written")
+            period_days = max(1, (started_at - collection_since).days)
+            meta = generate_metadata(
+                base, login, period_days, repos, commits, prs, stars, projects, orgs, SUBDIRS,
+                issues=issues, reviews=reviews, pinned=pinned, calendar=calendar,
+            )
+            meta.update(collection_since=collection_since.isoformat(), checkpoints=checkpoints)
+            (base / "metadata.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            generate_timeline(base, commits, prs, stars, issues=issues, reviews=reviews)
+            generate_summary(
+                base, login, period_days, repos, commits, prs, issues, reviews, stars, projects, orgs,
+                pinned=pinned, calendar=calendar,
+            )
+            typer.echo("✓  SUMMARY.md written")
 
+    except (GitHubAPIError, OSError, ValueError) as exc:
+        typer.echo(f"✗  Collection failed; previous output and checkpoints preserved: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo("\n✅  Done! Knowledge base is ready.")
 
 
@@ -183,16 +232,20 @@ def analyze(
     template: str = typer.Option(..., "--template", "-t", help="Template name (e.g. profile, weekly, resume)."),
     input_dir: str = typer.Option("./acta_data", "--input", "-i", help="Input data directory."),
     call_api: bool = typer.Option(False, "--call-api", help="Call Claude API to generate result."),
-    template_dir: str = typer.Option("./templates", "--template-dir", help="Templates directory."),
+    template_dir: str | None = typer.Option(None, "--template-dir", help="Override the bundled templates directory."),
 ) -> None:
     """Analyze collected data using LLM prompt templates."""
     from acta.analyzer import build_prompt, call_api as api_call, list_templates, load_template
 
     data_dir = Path(input_dir)
-    tmpl_dir = Path(template_dir)
+    from importlib.resources import files
+
+    if Path(template).name != template:
+        raise typer.BadParameter("Use a template name without directory components.")
+    tmpl_dir = Path(template_dir) if template_dir else files("acta").joinpath("templates")
     tmpl_path = tmpl_dir / f"{template}.md"
 
-    if not tmpl_path.exists():
+    if not tmpl_path.is_file():
         available = list_templates(tmpl_dir)
         typer.echo(f"✗  Template '{template}' not found.", err=True)
         if available:
@@ -338,9 +391,9 @@ def mcp() -> None:
     try:
         from acta.mcp_server import run_server
     except ImportError:
-        typer.echo("✗  MCP dependencies not installed. Run: uv add 'mcp[cli]'", err=True)
+        typer.echo("✗  MCP dependencies not installed. Install: uv tool install 'acta-ergo-sum[mcp]'", err=True)
         raise typer.Exit(code=1)
-    typer.echo("🚀  Starting Acta MCP server…")
+    typer.echo("🚀  Starting Acta MCP server…", err=True)
     run_server()
 
 

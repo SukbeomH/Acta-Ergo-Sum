@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from acta.client import GitHubClient
+from acta.client import GitHubClient, GitHubAPIError
 
 
 class TestRest:
@@ -22,14 +22,13 @@ class TestRest:
         assert result == {"login": "testuser"}
         mock_run.assert_called_once()
 
-    def test_returns_none_on_failure(self):
-        """gh 명령 실패 시 None을 반환한다."""
+    def test_raises_on_failure(self):
+        """A failed request must not masquerade as an empty result."""
         client = GitHubClient(rate_limit_delay=0)
 
         with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "gh", stderr="not found")):
-            result = client.rest("/nonexistent")
-
-        assert result is None
+            with pytest.raises(GitHubAPIError, match="not found"):
+                client.rest("/nonexistent")
 
     def test_retries_on_rate_limit(self):
         """rate limit 에러 시 재시도한다."""
@@ -70,8 +69,8 @@ class TestGraphql:
 
         assert result == {"user": {"login": "testuser"}}
 
-    def test_returns_none_on_graphql_errors(self):
-        """GraphQL errors 필드가 있으면 None을 반환한다."""
+    def test_raises_on_graphql_errors(self):
+        """Even partial GraphQL errors invalidate the collection checkpoint."""
         client = GitHubClient(rate_limit_delay=0)
         fake_result = MagicMock()
         fake_result.stdout = json.dumps({
@@ -79,9 +78,8 @@ class TestGraphql:
         })
 
         with patch("subprocess.run", return_value=fake_result):
-            result = client.graphql("query { bad }", {})
-
-        assert result is None
+            with pytest.raises(GitHubAPIError, match="Something went wrong"):
+                client.graphql("query { bad }", {})
 
     def test_passes_variables_correctly(self):
         """변수를 올바른 gh CLI 플래그로 변환한다."""
@@ -120,3 +118,34 @@ class TestGetAuthenticatedUser:
         with patch("subprocess.run", return_value=fake_result):
             with pytest.raises(RuntimeError):
                 client.get_authenticated_user()
+
+
+@pytest.mark.parametrize("status", [401, 403, 503])
+def test_optional_resource_only_tolerates_not_found(status):
+    error = subprocess.CalledProcessError(1, "gh", stderr=f"failure (HTTP {status})")
+    with patch("subprocess.run", side_effect=error):
+        with pytest.raises(GitHubAPIError):
+            GitHubClient().rest("/repos/a/b/readme", allow_missing=True)
+
+
+def test_expected_optional_404_is_not_a_collection_failure():
+    error = subprocess.CalledProcessError(1, "gh", stderr="Not Found (HTTP 404)")
+    with patch("subprocess.run", side_effect=error):
+        assert GitHubClient().rest("/repos/a/b/readme", allow_missing=True) is None
+        with pytest.raises(GitHubAPIError):
+            GitHubClient().rest("/repos/a/b/readme")
+
+
+@pytest.mark.parametrize("method", ["rest", "graphql"])
+def test_timeouts_are_explicit_failures(method):
+    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 60)):
+        with pytest.raises(GitHubAPIError, match="timed out"):
+            client = GitHubClient()
+            client.rest("/user") if method == "rest" else client.graphql("query", {})
+
+
+def test_rest_query_parameters_still_use_get():
+    result = MagicMock(stdout='[]')
+    with patch("subprocess.run", return_value=result) as run:
+        GitHubClient().rest("/user/orgs", per_page=100)
+    assert run.call_args.args[0][2:4] == ["--method", "GET"]

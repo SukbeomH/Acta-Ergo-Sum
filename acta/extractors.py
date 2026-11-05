@@ -11,8 +11,9 @@ from typing import Any, Optional
 
 import typer
 
-from acta.client import GitHubClient
+from acta.client import GitHubClient, GitHubAPIError
 from acta.writers import write_md
+from acta.storage import merge_records
 
 # ---------------------------------------------------------------------------
 # GraphQL Queries
@@ -30,6 +31,7 @@ query($login: String!, $after: String) {
       pageInfo { hasNextPage endCursor }
       nodes {
         name
+        nameWithOwner
         description
         url
         createdAt
@@ -86,6 +88,7 @@ query($login: String!, $after: String) {
         title
         state
         createdAt
+        updatedAt
         mergedAt
         closedAt
         url
@@ -117,6 +120,32 @@ query($login: String!, $after: String) {
 # Helpers
 # ---------------------------------------------------------------------------
 
+def repository_name(repo: dict, login: str) -> str:
+    """Preserve the owner supplied by GitHub; support earlier cached responses."""
+    if repo.get("nameWithOwner"):
+        return repo["nameWithOwner"]
+    url = repo.get("url", "")
+    if url.startswith("https://github.com/"):
+        return url.removeprefix("https://github.com/").strip("/")
+    return f"{login}/{repo['name']}"
+
+
+def _repository_filename(repo: dict, login: str) -> str:
+    return repository_name(repo, login).replace("/", "__")
+
+
+def _write_repository_md(
+    directory: Path, repo: dict, login: str, frontmatter: dict, body: str, suffix: str = "",
+) -> None:
+    path = directory / f"{_repository_filename(repo, login)}{suffix}.md"
+    write_md(path, frontmatter, body)
+    legacy = directory / f"{repo['name']}{suffix}.md"
+    if legacy != path and legacy.exists() and repo.get("url"):
+        header = legacy.read_text(encoding="utf-8").split("---", 2)
+        if len(header) == 3 and f"url: {repo['url']}" in header[1].splitlines():
+            legacy.unlink()
+
+
 def _iso_to_dt(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
@@ -124,7 +153,9 @@ def _iso_to_dt(iso: str) -> datetime:
 def _fetch_language_breakdown(client: GitHubClient, owner: str, repo_name: str) -> list[str]:
     """REST API로 레포의 언어 비율을 가져온다. 퍼센트 문자열 리스트 반환."""
     data = client.rest(f"/repos/{owner}/{repo_name}/languages")
-    if not isinstance(data, dict) or not data:
+    if not isinstance(data, dict):
+        raise GitHubAPIError("Invalid repository languages response")
+    if not data:
         return []
     total = sum(data.values())
     if total == 0:
@@ -153,7 +184,7 @@ def extract_repositories(
 
         data = client.graphql(_REPO_QUERY, variables)
         if not data:
-            break
+            raise GitHubAPIError("Missing GraphQL collection response")
 
         page_data = data["user"]["repositories"]
         nodes = page_data["nodes"]
@@ -171,10 +202,11 @@ def extract_repositories(
         topics = [n["topic"]["name"] for n in repo.get("repositoryTopics", {}).get("nodes", [])]
         lang = repo.get("primaryLanguage") or {}
         branch = repo.get("defaultBranchRef") or {}
-        languages = _fetch_language_breakdown(client, login, repo["name"])
+        languages = _fetch_language_breakdown(client, *repository_name(repo, login).split("/", 1))
 
         frontmatter: dict[str, Any] = {
             "name": repo["name"],
+            "name_with_owner": repository_name(repo, login),
             "url": repo["url"],
             "created_at": repo["createdAt"],
             "updated_at": repo["updatedAt"],
@@ -189,7 +221,7 @@ def extract_repositories(
             "default_branch": branch.get("name", "main"),
         }
         desc = repo.get("description") or ""
-        body_lines = [f"## {repo['name']}"]
+        body_lines = [f"## {repository_name(repo, login)}"]
         if desc:
             body_lines.append(f"\n> {desc}")
         body_lines.append("")
@@ -200,7 +232,7 @@ def extract_repositories(
         body_lines.append(f"- **Last push**: {repo.get('pushedAt', 'N/A')[:10]}")
         if topics:
             body_lines.append(f"- **Topics**: {', '.join(topics)}")
-        write_md(base / "repositories" / f"{repo['name']}.md", frontmatter, "\n".join(body_lines))
+        _write_repository_md(base / "repositories", repo, login, frontmatter, "\n".join(body_lines))
         written += 1
         time.sleep(client.rate_limit_delay)
 
@@ -224,6 +256,7 @@ query($login: String!, $after: String) {
       pageInfo { hasNextPage endCursor }
       nodes {
         name
+        nameWithOwner
         description
         url
         createdAt
@@ -247,7 +280,7 @@ def extract_contributed_repos(
     client: GitHubClient, base: Path, login: str, since: datetime,
     exclude_names: set[str] | None = None,
 ) -> list[dict]:
-    """COLLABORATOR/ORG_MEMBER 레포를 수집한다. exclude_names에 있는 레포는 제외."""
+    """Collect collaborator/org repositories, excluding full owner/name identities."""
     typer.echo("→  Extracting contributed repositories…")
     exclude = exclude_names or set()
     cursor: Optional[str] = None
@@ -261,12 +294,12 @@ def extract_contributed_repos(
 
         data = client.graphql(_CONTRIBUTED_REPO_QUERY, variables)
         if not data:
-            break
+            raise GitHubAPIError("Missing GraphQL collection response")
 
         page_data = data["user"]["repositories"]
         nodes = page_data["nodes"]
         for node in nodes:
-            if node["name"] not in exclude:
+            if repository_name(node, login) not in exclude:
                 repos.append(node)
         page += 1
         typer.echo(f"   page {page}: {len(nodes)} repos ({len(repos)} after dedup)")
@@ -281,10 +314,11 @@ def extract_contributed_repos(
         topics = [n["topic"]["name"] for n in repo.get("repositoryTopics", {}).get("nodes", [])]
         lang = repo.get("primaryLanguage") or {}
         branch = repo.get("defaultBranchRef") or {}
-        languages = _fetch_language_breakdown(client, login, repo["name"])
+        languages = _fetch_language_breakdown(client, *repository_name(repo, login).split("/", 1))
 
         frontmatter: dict[str, Any] = {
             "name": repo["name"],
+            "name_with_owner": repository_name(repo, login),
             "url": repo["url"],
             "created_at": repo["createdAt"],
             "updated_at": repo["updatedAt"],
@@ -300,7 +334,7 @@ def extract_contributed_repos(
             "contributed": True,
         }
         desc = repo.get("description") or ""
-        body_lines = [f"## {repo['name']}"]
+        body_lines = [f"## {repository_name(repo, login)}"]
         if desc:
             body_lines.append(f"\n> {desc}")
         body_lines.append("")
@@ -312,7 +346,7 @@ def extract_contributed_repos(
         if topics:
             body_lines.append(f"- **Topics**: {', '.join(topics)}")
         body_lines.append(f"- **Contributed**: Yes")
-        write_md(base / "repositories" / f"{repo['name']}.md", frontmatter, "\n".join(body_lines))
+        _write_repository_md(base / "repositories", repo, login, frontmatter, "\n".join(body_lines))
         written += 1
         time.sleep(client.rate_limit_delay)
 
@@ -342,7 +376,7 @@ def extract_commits(
         cursor: Optional[str] = None
         while True:
             variables: dict[str, Any] = {
-                "owner": login,
+                "owner": repository_name(repo, login).split("/", 1)[0],
                 "name": repo_name,
                 "since": since_iso,
             }
@@ -351,7 +385,7 @@ def extract_commits(
 
             data = client.graphql(_COMMIT_QUERY, variables)
             if not data:
-                break
+                raise GitHubAPIError("Missing commit history response")
 
             default_ref = data.get("repository", {}).get("defaultBranchRef")
             if not default_ref:
@@ -364,16 +398,15 @@ def extract_commits(
                 user = author.get("user") or {}
                 if user.get("login", "").lower() != login.lower():
                     continue
-                month = node["committedDate"][:7]
                 entry = {
-                    "repo": repo_name,
+                    "repo": repository_name(repo, login),
+                    "oid": node["oid"],
                     "sha": node["oid"][:7],
                     "message": node["message"].split("\n")[0],
                     "date": node["committedDate"],
                     "additions": node.get("additions", 0),
                     "deletions": node.get("deletions", 0),
                 }
-                by_month[month].append(entry)
                 all_commits.append(entry)
 
             if not history["pageInfo"]["hasNextPage"]:
@@ -382,6 +415,10 @@ def extract_commits(
             time.sleep(client.rate_limit_delay)
 
         time.sleep(client.rate_limit_delay)
+
+    all_commits = merge_records(base, "commits", all_commits, lambda row: (row["repo"], row["oid"]))
+    for entry in all_commits:
+        by_month[entry["date"][:7]].append(entry)
 
     for month, entries in sorted(by_month.items()):
         frontmatter: dict[str, Any] = {
@@ -424,15 +461,15 @@ def extract_pull_requests(
 
         data = client.graphql(_PR_QUERY, variables)
         if not data:
-            break
+            raise GitHubAPIError("Missing GraphQL collection response")
 
         page_data = data["user"]["pullRequests"]
         nodes = page_data["nodes"]
 
         reached_cutoff = False
         for node in nodes:
-            created = _iso_to_dt(node["createdAt"])
-            if created < since:
+            updated = _iso_to_dt(node.get("updatedAt", node["createdAt"]))
+            if updated < since:
                 reached_cutoff = True
                 break
             prs.append(node)
@@ -444,6 +481,8 @@ def extract_pull_requests(
             break
         cursor = page_data["pageInfo"]["endCursor"]
         time.sleep(client.rate_limit_delay)
+
+    prs = merge_records(base, "pull_requests", prs, lambda row: (row["repository"]["nameWithOwner"], row["number"]))
 
     for pr in prs:
         repo_name = pr["repository"]["nameWithOwner"].replace("/", "_")
@@ -510,8 +549,7 @@ def extract_readmes(
     written = 0
 
     for repo in repos:
-        repo_name = repo["name"]
-        data = client.rest(f"/repos/{login}/{repo_name}/readme")
+        data = client.rest(f"/repos/{repository_name(repo, login)}/readme", allow_missing=True)
 
         if data is None:
             time.sleep(client.rate_limit_delay)
@@ -527,13 +565,12 @@ def extract_readmes(
             continue
 
         frontmatter: dict[str, Any] = {
-            "repo": repo_name,
+            "repo": repository_name(repo, login),
             "url": repo.get("url", ""),
             "archived_at": datetime.now(timezone.utc).isoformat(),
             "category": "readme",
         }
-        out_path = base / "readmes" / f"{repo_name}_readme.md"
-        write_md(out_path, frontmatter, content)
+        _write_repository_md(base / "readmes", repo, login, frontmatter, content, suffix="_readme")
         written += 1
         time.sleep(client.rate_limit_delay)
 
@@ -584,7 +621,7 @@ def extract_stars(
 
         data = client.graphql(_STARS_QUERY, variables)
         if not data:
-            break
+            raise GitHubAPIError("Missing GraphQL collection response")
 
         starred = data["viewer"]["starredRepositories"]
         edges = starred["edges"]
@@ -611,14 +648,16 @@ def extract_stars(
                 "topics": topics,
                 "stars": node.get("stargazerCount", 0),
             }
-            month = entry["starred_at"][:7]
-            by_month[month].append(entry)
             all_stars.append(entry)
 
         if reached_cutoff or not starred["pageInfo"]["hasNextPage"]:
             break
         cursor = starred["pageInfo"]["endCursor"]
         time.sleep(client.rate_limit_delay)
+
+    all_stars = merge_records(base, "stars", all_stars, lambda row: (row["name"], row["starred_at"]))
+    for entry in all_stars:
+        by_month[entry["starred_at"][:7]].append(entry)
 
     for month, entries in sorted(by_month.items()):
         frontmatter: dict[str, Any] = {
@@ -663,6 +702,7 @@ query($login: String!, $after: String) {
         title
         state
         createdAt
+        updatedAt
         closedAt
         url
         body
@@ -698,15 +738,15 @@ def extract_issues(
 
         data = client.graphql(_ISSUE_QUERY, variables)
         if not data:
-            break
+            raise GitHubAPIError("Missing GraphQL collection response")
 
         page_data = data["user"]["issues"]
         nodes = page_data["nodes"]
 
         reached_cutoff = False
         for node in nodes:
-            created = _iso_to_dt(node["createdAt"])
-            if created < since:
+            updated = _iso_to_dt(node.get("updatedAt", node["createdAt"]))
+            if updated < since:
                 reached_cutoff = True
                 break
             issues.append(node)
@@ -718,6 +758,8 @@ def extract_issues(
             break
         cursor = page_data["pageInfo"]["endCursor"]
         time.sleep(client.rate_limit_delay)
+
+    issues = merge_records(base, "issues", issues, lambda row: (row["repository"]["nameWithOwner"], row["number"]))
 
     # 월별 그룹핑
     by_month: dict[str, list[dict]] = defaultdict(list)
@@ -774,6 +816,7 @@ query($login: String!, $from: DateTime!, $to: DateTime!, $after: String) {
         nodes {
           occurredAt
           pullRequestReview {
+            id
             state
             createdAt
             body
@@ -797,46 +840,54 @@ def extract_reviews(
 ) -> list[dict]:
     """다른 사람 PR에 남긴 코드 리뷰를 월별 MD 파일로 수집한다."""
     typer.echo("→  Extracting code reviews…")
-    cursor: Optional[str] = None
     reviews: list[dict] = []
     now = datetime.now(timezone.utc)
 
-    while True:
-        variables: dict[str, Any] = {
-            "login": login,
-            "from": since.isoformat(),
-            "to": now.isoformat(),
-        }
-        if cursor:
-            variables["after"] = cursor
+    window_start = since
+    while window_start < now:
+        window_end = min(window_start + timedelta(days=365), now)
+        cursor = None
+        while True:
+            variables: dict[str, Any] = {
+                "login": login,
+                "from": window_start.isoformat(),
+                "to": window_end.isoformat(),
+            }
+            if cursor:
+                variables["after"] = cursor
 
-        data = client.graphql(_REVIEW_CONTRIBUTIONS_QUERY, variables)
-        if not data:
-            break
+            data = client.graphql(_REVIEW_CONTRIBUTIONS_QUERY, variables)
+            if not data:
+                raise GitHubAPIError("Missing GraphQL collection response")
 
-        contributions = data["user"]["contributionsCollection"]["pullRequestReviewContributions"]
-        nodes = contributions["nodes"]
+            contributions = data["user"]["contributionsCollection"]["pullRequestReviewContributions"]
+            nodes = contributions["nodes"]
 
-        for node in nodes:
-            occurred = _iso_to_dt(node["occurredAt"])
-            if occurred < since:
-                continue
-            review = node["pullRequestReview"]
-            pr = review["pullRequest"]
-            reviews.append({
-                "date": node["occurredAt"],
-                "state": review["state"],
-                "body": review.get("body", ""),
-                "pr_title": pr["title"],
-                "pr_number": pr["number"],
-                "pr_url": pr["url"],
-                "repository": pr["repository"]["nameWithOwner"],
-            })
+            for node in nodes:
+                occurred = _iso_to_dt(node["occurredAt"])
+                if occurred < since:
+                    continue
+                review = node["pullRequestReview"]
+                pr = review["pullRequest"]
+                reviews.append({
+                    "id": review.get("id") or f"{pr['url']}@{node['occurredAt']}",
+                    "date": node["occurredAt"],
+                    "state": review["state"],
+                    "body": review.get("body", ""),
+                    "pr_title": pr["title"],
+                    "pr_number": pr["number"],
+                    "pr_url": pr["url"],
+                    "repository": pr["repository"]["nameWithOwner"],
+                })
 
-        if not contributions["pageInfo"]["hasNextPage"]:
-            break
-        cursor = contributions["pageInfo"]["endCursor"]
-        time.sleep(client.rate_limit_delay)
+            if not contributions["pageInfo"]["hasNextPage"]:
+                break
+            cursor = contributions["pageInfo"]["endCursor"]
+            time.sleep(client.rate_limit_delay)
+
+        window_start = window_end
+
+    reviews = merge_records(base, "reviews", reviews, lambda row: row["id"])
 
     # 월별 그룹핑
     by_month: dict[str, list[dict]] = defaultdict(list)
@@ -899,7 +950,7 @@ def extract_projects(client: GitHubClient, base: Path, login: str) -> list[dict]
 
         data = client.graphql(_PROJECT_QUERY, variables)
         if not data:
-            break
+            raise GitHubAPIError("Missing GraphQL collection response")
 
         page_data = data["user"]["projectsV2"]
         projects.extend(page_data["nodes"])
@@ -942,7 +993,7 @@ def extract_organizations(client: GitHubClient, base: Path, login: str) -> list[
     typer.echo("→  Extracting organizations…")
     data = client.rest("/user/orgs")
     if not isinstance(data, list):
-        data = []
+        raise GitHubAPIError("Invalid organizations response")
 
     for org in data:
         frontmatter: dict[str, Any] = {
@@ -1005,8 +1056,7 @@ def extract_profile(
 
     data = client.graphql(_PROFILE_QUERY, {"login": login})
     if not data or "user" not in data:
-        typer.echo("✗  Could not fetch profile")
-        return {}
+        raise GitHubAPIError("Could not fetch profile")
 
     user = data["user"]
     social = [
@@ -1094,8 +1144,7 @@ def extract_pinned_repos(
 
     data = client.graphql(_PINNED_QUERY, {"login": login})
     if not data or "user" not in data:
-        typer.echo("✗  Could not fetch pinned repos")
-        return []
+        raise GitHubAPIError("Could not fetch pinned repos")
 
     nodes = data["user"]["pinnedItems"]["nodes"]
     if not nodes:
@@ -1108,7 +1157,7 @@ def extract_pinned_repos(
     for i, repo in enumerate(nodes, 1):
         lang = (repo.get("primaryLanguage") or {}).get("name", "")
         topics = [t["topic"]["name"] for t in repo.get("repositoryTopics", {}).get("nodes", [])]
-        languages = _fetch_language_breakdown(client, login, repo["name"])
+        languages = _fetch_language_breakdown(client, *repository_name(repo, login).split("/", 1))
 
         pinned_list.append({
             "name": repo["name"],
@@ -1193,8 +1242,7 @@ def extract_contribution_calendar(
         "to": now.isoformat(),
     })
     if not data or "user" not in data:
-        typer.echo("✗  Could not fetch contribution calendar")
-        return {}
+        raise GitHubAPIError("Could not fetch contribution calendar")
 
     collection = data["user"]["contributionsCollection"]
     calendar = collection["contributionCalendar"]

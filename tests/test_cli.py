@@ -22,6 +22,8 @@ def _mock_subprocess_run(*args, **kwargs):
         result = MagicMock()
         result.stdout = json.dumps({"login": "testuser"})
         return result
+    if "/user/orgs" in cmd:
+        return MagicMock(stdout="[]")
     # 기타 API 호출 — 빈 응답
     result = MagicMock()
     result.stdout = json.dumps({"data": {

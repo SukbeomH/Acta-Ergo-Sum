@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
@@ -23,5 +25,11 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - run: uv sync --dev
+      - run: uv sync --dev --extra mcp
       - run: uv run pytest tests/ -v
+
+      - name: Build distribution
+        run: uv build
+
+      - name: Test installed wheel and MCP stdio
+        run: uv run python scripts/check_wheel.py dist/*.whl

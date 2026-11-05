@@ -29,7 +29,7 @@ from acta.deep.renderer import (
 
 mcp = FastMCP(
     "acta-ergo-sum",
-    description="GitHub 레포지토리를 분석하여 프로젝트 구조, 기술 스택, 설계 의도를 LLM에 제공합니다.",
+    instructions="GitHub 레포지토리를 분석하여 프로젝트 구조, 기술 스택, 설계 의도를 LLM에 제공합니다.",
 )
 
 

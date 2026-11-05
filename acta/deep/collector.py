@@ -124,7 +124,7 @@ class DeepCollector:
 
     def fetch_overview(self) -> dict[str, Any]:
         """레포 기본 메타데이터를 가져온다."""
-        typer.echo("  → overview…")
+        typer.echo("  → overview…", err=True)
         data = self._gql(_REPO_OVERVIEW_QUERY)
         if not data or "repository" not in data:
             return {}
@@ -132,8 +132,8 @@ class DeepCollector:
 
     def fetch_readme(self) -> str:
         """README 내용을 가져온다."""
-        typer.echo("  → readme…")
-        data = self.client.rest(f"/repos/{self.owner}/{self.repo}/readme")
+        typer.echo("  → readme…", err=True)
+        data = self.client.rest(f"/repos/{self.owner}/{self.repo}/readme", allow_missing=True)
         if not data or not isinstance(data, dict) or "content" not in data:
             return ""
         try:
@@ -148,7 +148,7 @@ class DeepCollector:
 
         default_branch: overview에서 가져온 기본 브랜치 이름. 없으면 API에서 조회 후 main/master 순서로 시도.
         """
-        typer.echo("  → file tree…")
+        typer.echo("  → file tree…", err=True)
         branches = [default_branch] if default_branch else []
         # default branch를 모르면 REST에서 조회
         if not default_branch:
@@ -161,7 +161,7 @@ class DeepCollector:
         for branch in branches:
             if not branch:
                 continue
-            ref_data = self.client.rest(f"/repos/{self.owner}/{self.repo}/git/ref/heads/{branch}")
+            ref_data = self.client.rest(f"/repos/{self.owner}/{self.repo}/git/ref/heads/{branch}", allow_missing=True)
             if ref_data and isinstance(ref_data, dict) and "object" in ref_data:
                 break
             ref_data = None
@@ -196,7 +196,7 @@ class DeepCollector:
 
     def fetch_languages(self) -> dict[str, int]:
         """언어별 바이트 비율을 가져온다."""
-        typer.echo("  → languages…")
+        typer.echo("  → languages…", err=True)
         data = self.client.rest(f"/repos/{self.owner}/{self.repo}/languages")
         if not isinstance(data, dict):
             return {}
@@ -206,7 +206,7 @@ class DeepCollector:
 
     def fetch_file_content(self, path: str) -> str:
         """특정 파일의 내용을 가져온다."""
-        data = self.client.rest(f"/repos/{self.owner}/{self.repo}/contents/{path}")
+        data = self.client.rest(f"/repos/{self.owner}/{self.repo}/contents/{path}", allow_missing=True)
         if not data or not isinstance(data, dict) or "content" not in data:
             return ""
         try:
@@ -216,7 +216,7 @@ class DeepCollector:
 
     def fetch_dependencies(self) -> list[dict[str, Any]]:
         """의존성 그래프 매니페스트를 가져온다."""
-        typer.echo("  → dependencies…")
+        typer.echo("  → dependencies…", err=True)
         data = self._gql(_DEPENDENCY_QUERY)
         if not data or "repository" not in data:
             return []
@@ -225,8 +225,8 @@ class DeepCollector:
 
     def fetch_community_health(self) -> dict[str, Any]:
         """커뮤니티 프로필(건강도)을 가져온다."""
-        typer.echo("  → community health…")
-        data = self.client.rest(f"/repos/{self.owner}/{self.repo}/community/profile")
+        typer.echo("  → community health…", err=True)
+        data = self.client.rest(f"/repos/{self.owner}/{self.repo}/community/profile", allow_missing=True)
         if not isinstance(data, dict):
             return {}
         return data
@@ -235,7 +235,7 @@ class DeepCollector:
 
     def fetch_releases(self) -> list[dict[str, Any]]:
         """최근 릴리스를 가져온다."""
-        typer.echo("  → releases…")
+        typer.echo("  → releases…", err=True)
         data = self._gql(_RELEASES_QUERY)
         if not data or "repository" not in data:
             return []
@@ -243,7 +243,7 @@ class DeepCollector:
 
     def fetch_recent_commits(self, limit: int = 100) -> list[dict[str, Any]]:
         """최근 커밋을 가져온다."""
-        typer.echo("  → recent commits…")
+        typer.echo("  → recent commits…", err=True)
         data = self.client.rest(
             f"/repos/{self.owner}/{self.repo}/commits?per_page={limit}",
         )
@@ -255,7 +255,7 @@ class DeepCollector:
 
     def fetch_issue_labels(self) -> list[dict[str, Any]]:
         """이슈 라벨 분포를 가져온다."""
-        typer.echo("  → issue labels…")
+        typer.echo("  → issue labels…", err=True)
         data = self._gql(_ISSUE_LABELS_QUERY)
         if not data or "repository" not in data:
             return []
@@ -265,7 +265,7 @@ class DeepCollector:
 
     def fetch_my_contributions(self, login: str) -> dict[str, Any]:
         """특정 사용자의 이 레포 기여를 가져온다."""
-        typer.echo(f"  → contributions by {login}…")
+        typer.echo(f"  → contributions by {login}…", err=True)
         stats = self.client.rest(f"/repos/{self.owner}/{self.repo}/stats/contributors")
         if not isinstance(stats, list):
             return {}

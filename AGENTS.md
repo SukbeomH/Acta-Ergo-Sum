@@ -15,7 +15,7 @@ uv run python app.py deep owner/repo --stdout # Pipe to LLM agent
 uv run python app.py mcp                     # Start MCP server
 uv run python app.py analyze -t profile      # Template-based analysis
 uv run python app.py whoami                  # Show authenticated user
-uv run pytest tests/ -v                      # Run tests (83)
+uv run pytest tests/ -v                      # Run tests
 uv build                                     # Build for PyPI
 ```
 
