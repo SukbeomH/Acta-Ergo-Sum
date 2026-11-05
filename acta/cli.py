@@ -10,6 +10,7 @@ from pathlib import Path
 import typer
 
 from acta.client import GitHubClient, GitHubAPIError
+from acta.collection_export import CollectionExport
 from acta.storage import load_records, staged_output
 from acta.extractors import (
     extract_commits,
@@ -28,12 +29,15 @@ from acta.extractors import (
     extract_stars,
 )
 from acta.writers import generate_metadata, generate_summary, generate_timeline
+from acta.portfolio.cli import app as portfolio_app
 
 app = typer.Typer(
     name="acta",
     help="Acta Ergo Sum — Collect your GitHub activity into a markdown knowledge base.",
     add_completion=False,
 )
+
+app.add_typer(portfolio_app, name="portfolio")
 
 SUBDIRS = [
     "repositories",
@@ -112,13 +116,20 @@ def run(
 
     checkpoints = dict(previous.get("checkpoints", {}))
 
+    query_starts: dict[str, datetime] = {}
+
     def stage_since(category: str) -> datetime:
+        if category in query_starts:
+            return query_starts[category]
         if not since_last_run:
+            query_starts[category] = requested_since
             return requested_since
         if not (base / ".records" / f"{category}.json").exists():
             typer.echo(f"    Backfilling {category} from the original collection period.")
+            query_starts[category] = collection_since
             return collection_since
-        return datetime.fromisoformat(checkpoints.get(category, collection_since.isoformat()))
+        query_starts[category] = datetime.fromisoformat(checkpoints.get(category, collection_since.isoformat()))
+        return query_starts[category]
 
     typer.echo("🚀  Acta Ergo Sum — collecting activity")
     typer.echo(f"    Output: {base.resolve()}")
@@ -131,7 +142,8 @@ def run(
         raise typer.Exit(code=1)
 
     try:
-        client = GitHubClient()
+        collection = CollectionExport(base)
+        client = GitHubClient(observer=collection.observe)
         login = client.get_authenticated_user()
         typer.echo(f"    User:   {login}\n")
 
@@ -218,6 +230,16 @@ def run(
             generate_summary(
                 base, login, period_days, repos, commits, prs, issues, reviews, stars, projects, orgs,
                 pinned=pinned, calendar=calendar,
+            )
+            collection.finish(
+                base, login, repos, {"commits": commits, "pull_requests": prs, "issues": issues, "reviews": reviews},
+                {"repositories": {"state": "completed", "pagination_complete": True, "scope": "all API-visible owned repositories"},
+                 "contributed_repositories": {"state": "skipped" if skip_contributed else "completed", "pagination_complete": not skip_contributed,
+                                              "scope": "API-visible collaborator and organization-member repositories"},
+                 **{category: {"state": "skipped" if skip else "completed", "pagination_complete": not skip,
+                            "scope": "authenticated user; default-branch commits or updated/occurred activity",
+                            "since": checkpoints.get(category) if skip else stage_since(category).isoformat()}
+                 for category, skip in skipped.items()}},
             )
             typer.echo("✓  SUMMARY.md written")
 

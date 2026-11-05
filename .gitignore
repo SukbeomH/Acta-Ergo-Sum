@@ -36,3 +36,9 @@ uv.lock
 .idea/
 .vscode/
 *.swp
+
+# Local portfolio workspace and derived exports
+/portfolio/
+/portfolio_exports/
+*.sqlite3
+*.sqlite3-journal

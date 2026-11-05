@@ -13,7 +13,8 @@ uv run python app.py run --days 30 --skip-readmes  # Quick run
 uv run python app.py deep owner/repo         # Deep-analyze a repo
 uv run python app.py deep owner/repo --stdout # Pipe to LLM agent
 uv run python app.py mcp                     # Start MCP server
-uv run python app.py analyze -t profile      # Template-based analysis
+uv run python app.py analyze -t profile      # Unreviewed template-based analysis
+uv run acta portfolio --help                  # Reviewed local portfolio workflow
 uv run python app.py whoami                  # Show authenticated user
 uv run pytest tests/ -v                      # Run tests
 uv build                                     # Build for PyPI
@@ -26,9 +27,11 @@ acta/
 ├── client.py              # GitHubClient (gh CLI wrapping, REST/GraphQL)
 ├── extractors.py          # 13 extract_* functions (DI-based)
 ├── writers.py             # MD/JSON/CSV/Summary output
-├── cli.py                 # Typer CLI (run, deep, mcp, analyze, whoami)
+├── cli.py                 # Typer CLI (run, deep, mcp, analyze, whoami, portfolio)
 ├── analyzer.py            # Template-based prompt builder
 ├── mcp_server.py          # FastMCP server (4 tools)
+├── collection_export.py   # Versioned portfolio source and actual observations
+├── portfolio/             # SQLite workspace, claims, drafts, CLI and public export
 └── deep/
     ├── collector.py       # Repo deep analysis data collection
     ├── detector.py        # Key file / entry point auto-detection
@@ -38,7 +41,9 @@ app.py                     # Entry point
 
 - **Tech Stack**: Python 3.12+, Typer, GitHub CLI (`gh`), hatchling (build), FastMCP (optional)
 - **gh 호출**: `GitHubClient.rest()` / `.graphql()` — retry + rate-limit back-off
-- **출력**: YAML Frontmatter 마크다운 + `metadata.json` + `timeline.csv`
+- **출력**: YAML Frontmatter 마크다운 + `metadata.json` + `timeline.csv` + `portfolio-source.json`
+- 포트폴리오 사용자 기록은 별도 SQLite 작업 공간이 소유. 수집기와 서로 덮어쓰지 않는다.
+- 검토 상태는 정확한 주장·근거·블록 버전과 공개 판단에 연결한다. `.records/`를 외부 소비자 계약으로 사용하지 않는다.
 - **배포**: PyPI (`acta-ergo-sum`), uvx/pipx/pip 지원
 
 ## Key Conventions

@@ -30,6 +30,7 @@ query($login: String!, $after: String) {
     ) {
       pageInfo { hasNextPage endCursor }
       nodes {
+        id
         name
         nameWithOwner
         description
@@ -53,6 +54,10 @@ query($login: String!, $after: String) {
 _COMMIT_QUERY = """
 query($owner: String!, $name: String!, $since: GitTimestamp!, $after: String) {
   repository(owner: $owner, name: $name) {
+    id
+    nameWithOwner
+    isPrivate
+    url
     defaultBranchRef {
       target {
         ... on Commit {
@@ -84,6 +89,7 @@ query($login: String!, $after: String) {
     ) {
       pageInfo { hasNextPage endCursor }
       nodes {
+        id
         number
         title
         state
@@ -93,7 +99,7 @@ query($login: String!, $after: String) {
         closedAt
         url
         body
-        repository { nameWithOwner }
+        repository { id nameWithOwner isPrivate }
         reviews(first: 20) {
           nodes {
             state
@@ -255,6 +261,7 @@ query($login: String!, $after: String) {
     ) {
       pageInfo { hasNextPage endCursor }
       nodes {
+        id
         name
         nameWithOwner
         description
@@ -698,6 +705,7 @@ query($login: String!, $after: String) {
     ) {
       pageInfo { hasNextPage endCursor }
       nodes {
+        id
         number
         title
         state
@@ -706,7 +714,7 @@ query($login: String!, $after: String) {
         closedAt
         url
         body
-        repository { nameWithOwner }
+        repository { id nameWithOwner isPrivate }
         labels(first: 10) { nodes { name } }
         comments(first: 10) {
           nodes {
@@ -824,7 +832,7 @@ query($login: String!, $from: DateTime!, $to: DateTime!, $after: String) {
               title
               number
               url
-              repository { nameWithOwner }
+              repository { id nameWithOwner isPrivate }
             }
           }
         }
@@ -923,6 +931,7 @@ query($login: String!, $after: String) {
     projectsV2(first: 50, after: $after) {
       pageInfo { hasNextPage endCursor }
       nodes {
+        id
         number
         title
         shortDescription

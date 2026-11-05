@@ -15,8 +15,9 @@ class GitHubAPIError(RuntimeError):
 class GitHubClient:
     """gh CLI를 통해 GitHub REST/GraphQL API를 호출하는 클라이언트."""
 
-    def __init__(self, rate_limit_delay: float = 0.3):
+    def __init__(self, rate_limit_delay: float = 0.3, observer=None):
         self.rate_limit_delay = rate_limit_delay
+        self.observer = observer
 
     def rest(
         self, endpoint: str, retries: int = 3, delay: float = 5.0,
@@ -40,7 +41,10 @@ class GitHubClient:
                     timeout=60,
                 )
                 if result.stdout.strip():
-                    return json.loads(result.stdout)
+                    data = json.loads(result.stdout)
+                    if self.observer:
+                        self.observer("rest", endpoint, params, data)
+                    return data
                 return {}
             except subprocess.CalledProcessError as exc:
                 stderr = exc.stderr or ""
@@ -79,6 +83,8 @@ class GitHubClient:
                 data = json.loads(result.stdout)
                 if data.get("errors") or not isinstance(data.get("data"), dict):
                     raise GitHubAPIError(f"GraphQL request failed: {data.get('errors', 'missing data')}")
+                if self.observer:
+                    self.observer("graphql", query, variables, data["data"])
                 return data["data"]
             except subprocess.CalledProcessError as exc:
                 stderr = exc.stderr or ""

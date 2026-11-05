@@ -3,6 +3,7 @@
 Usage: uv run python scripts/check_wheel.py dist/acta_ergo_sum-0.1.0-py3-none-any.whl
 """
 import shutil
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,11 +17,13 @@ def main() -> None:
         temp = Path(directory)
         for name in ["test_package.py", "test_mcp.py"]:
             shutil.copy2(source / "tests" / name, temp / name)
-        subprocess.run([
-            "uv", "run", "--isolated", "--no-project", "--python", sys.executable,
-            "--with", f"{wheel}[mcp]",
-            "--with", "pytest>=8", "python", "-m", "pytest", "-q", str(temp),
-        ], cwd=temp, check=True, timeout=180)
+        env = {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "PYTHONHOME"}}
+        for extra, tests in [("", [temp / "test_package.py"]), ("[mcp]", [temp])]:
+            subprocess.run([
+                "uv", "run", "--isolated", "--no-project", "--python", sys.executable,
+                "--with", f"{wheel}{extra}", "--with", "pytest>=8", "python", "-m", "pytest", "-q",
+                *map(str, tests),
+            ], cwd=temp, env=env, check=True, timeout=180)
 
 
 if __name__ == "__main__":

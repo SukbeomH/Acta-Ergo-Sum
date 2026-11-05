@@ -11,7 +11,8 @@ GitHub 활동 데이터를 LLM 친화적 **Markdown 지식 베이스**로 수집
 - `acta run` — 내 GitHub 활동 전체를 수집 (이력서/포트폴리오용)
 - `acta deep` — 특정 레포를 분석하여 LLM이 프로젝트를 이해할 수 있는 컨텍스트 생성
 - `acta mcp` — MCP 서버로 LLM 에이전트에게 도구를 직접 노출
-- `acta analyze` — 수집한 자료와 기본·사용자 템플릿을 결합해 분석 프롬프트 생성
+- `acta analyze` — 수집한 자료와 기본·사용자 템플릿을 결합해 미검토 분석 프롬프트 생성
+- `acta portfolio` — 프로젝트·본인 기여·근거를 확인하고 로컬 소개문을 보존·내보내기
 
 ---
 
@@ -144,6 +145,70 @@ API 오류나 시간 초과가 발생하면 종료 코드 1을 반환하고 이�
 이 이관이 필요한 활동 단계는 처음 한 번 `--skip-*` 없이 실행해야 합니다.
 저장소와 README 파일명은 소유자를 포함한 `owner__repo.md`, `owner__repo_readme.md` 형식입니다.
 
+### 근거 기반 포트폴리오 (`portfolio`)
+
+첫 출시에서는 프로젝트 선택, 개인·팀 기여 확인, 소개문 내보내기와 재수집 후 검토를 제공합니다.
+공고별 맞춤 생성과 외부 LLM 다듬기는 포함하지 않습니다. 추가 라이브러리 없이 Python 표준 SQLite를 사용합니다.
+
+```bash
+# 수집 결과와 분리된 작업 공간 생성
+acta portfolio init --source ./acta_data --workspace ./portfolio
+acta portfolio projects
+acta portfolio select <project-id> --reason "플랫폼 직무와 관련" --disclosure public
+
+# 선택한 프로젝트의 근거를 보고 발췌와 공개 판단을 편집
+acta portfolio evidence list --project <project-id>
+acta portfolio evidence edit <evidence-id>
+
+# JSON 편집기로 본인 역할·행동·결과와 evidence_ids 작성
+acta portfolio claim edit --project <project-id>
+acta portfolio claim review <claim-id>
+acta portfolio draft create --project <project-id>
+acta portfolio draft edit <draft-id>
+acta portfolio draft review <draft-id>
+acta portfolio export <draft-id> --audience public --output ./portfolio_exports
+
+# 기본 갱신은 로컬 파일만 읽음
+acta run --since-last-run
+acta portfolio refresh
+acta portfolio review
+
+# 연결한 원격 근거를 실제로 다시 조회할 때만 지정
+acta portfolio refresh --probe-selected
+```
+
+`projects`는 수집 계정·시점·조회 범위와 후보를 함께 표시합니다. 프로젝트·주장·근거·초안 ID는 각 명령의 출력에 표시됩니다. 기본 작업 공간은 현재 디렉터리의 `./portfolio`입니다.
+다른 경로는 `acta portfolio --workspace ./my_portfolio <command>`로 지정합니다.
+GitHub 외 프로젝트는 `add-project --name "프로젝트명"`으로 추가합니다. 수집 없이 `portfolio init`으로 시작할 수도 있습니다.
+
+편집기는 `scope`(`individual`, `team`, `unknown`), `role`, `problem`, `action`, `result`, `statement`,
+`evidence_ids`, `result_kind`(`qualitative`, `measured`), `metrics`, `disclosure`를 보여줍니다.
+수동 근거는 `manual_evidence`에 `excerpt`와 `disclosure`를 입력합니다. 자기 보고로 표시되며 독립적으로 검증된 사실을 의미하지 않습니다.
+수치가 없어도 정성적 기여를 확인할 수 있습니다. 측정 결과에는 값·단위·기간·방법·연결 근거가 필요하고 비교에는 기준값과 조건도 필요합니다.
+숫자 패턴은 검토 누락을 막는 보조 검사이며 사실의 진위를 자동 판정하지 않습니다.
+
+`claim review`와 `draft review`는 정확한 본문과 근거를 보여준 뒤 사용자 확인을 받습니다.
+`--show`는 확인 없이 조회합니다. 자동화에서는 이 출력의 `digest`와 `revision`을 `--approve <digest> --revision <revision>`으로 전달합니다.
+편집 명령은 `--file <json>`과 `--revision <revision>`도 지원합니다. 편집 전의 revision을 전달하면 오래된 파일로 새 편집을 덮어쓰지 않습니다.
+충돌하거나 잘못된 JSON을 저장하려 했을 때는 제안 내용을 작업 공간의 `edits/`에 보존합니다.
+
+확인은 정확한 주장·문장·근거 버전에 연결됩니다. 내용을 수정하거나 연결 근거가 바뀌면 관련 확인이 무효가 됩니다.
+재생성은 별도 초안을 만들고 이전 초안의 편집 이력은 유지합니다.
+`draft list --project <project-id>`, `draft history <draft-id>`, `claim history <claim-id>`로 초안과 이전 버전·확인 이력을 다시 조회합니다. 새 관찰이 없는 캐시를 최신 확인이나 삭제로 해석하지 않습니다.
+404는 삭제 확정이 아닌 접근 불가 또는 찾을 수 없음으로 기록하며, 요청 실패는 마지막 정상 내용을 유지합니다.
+
+공개 내보내기는 프로젝트·블록·주장·발췌와 URL의 공개 여부를 함께 검사합니다.
+기본값 `needs_review`나 비공개 자료가 있으면 중단하고 이유를 표시합니다. 명시적으로 제외할 문장은 `--exclude-block <block-id>`를 지정할 수 있습니다.
+성공하면 유일한 디렉터리에 `document.md`와 공개 가능한 `evidence.json`을 함께 게시합니다. 원격 GitHub에는 쓰지 않습니다.
+
+수집기의 `portfolio-source.json`은 버전·계정·범위·고정 식별자·실제 관찰을 담은 단일 입력입니다.
+이 파일이 없는 이전 출력은 `portfolio init --source ./acta_data --legacy`로 명시적으로 이관할 수 있습니다.
+고정 ID·공개 상태·관찰 시점이 없으면 미확인으로 남습니다. 재수집이나 선택 근거 조회로 보완하거나 수동 기록을 작성하세요.
+
+작업 공간의 정본은 `portfolio/workspace.sqlite3`입니다. 수집 결과와 경로를 겹치게 지정할 수 없습니다.
+일관된 DB 백업은 `acta portfolio backup --output ./portfolio-backup.sqlite3`로 생성합니다.
+기존 `analyze` 출력은 미검토 초안이며 포트폴리오 확인 상태를 자동으로 얻지 않습니다.
+
 ### 레포 딥 분석 (`deep`)
 
 ```bash
@@ -213,6 +278,7 @@ uv run python app.py analyze -t profile -i ./acta_data --template-dir ./my_templ
 
 ```text
 acta_data/
+├── portfolio-source.json  # 버전 있는 포트폴리오 입력과 실제 관찰
 ├── .records/              # 누적 활동 원본 JSON — 증분 실행 시 유지
 ├── profile.md             # 사용자 프로필 (bio, location, social)
 ├── pinned.md              # 핀된 레포 (포트폴리오 하이라이트)
@@ -314,7 +380,7 @@ uv run python scripts/check_wheel.py dist/*.whl
 ```
 
 CI는 Python 3.12와 3.13에서 수집 회귀 테스트와 전체 테스트를 실행합니다.
-wheel 검증은 소스 디렉터리 밖의 격리된 환경에서 기본·사용자 템플릿과 실제 MCP stdio 초기화·도구 조회·호출을 확인합니다.
+wheel 검증은 소스 디렉터리 밖의 격리된 환경에서 기본·사용자 템플릿, 설치된 CLI의 포트폴리오 완주, 실제 MCP stdio 초기화·도구 조회·호출을 확인합니다.
 MCP 테스트의 GitHub 응답은 가짜 `gh` 실행 파일로 제공하므로 인증이나 네트워크가 필요하지 않습니다.
 
 ---
